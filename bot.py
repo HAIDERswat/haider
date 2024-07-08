@@ -18,6 +18,7 @@ API_BASE_URL = get_setting('API_BASE_URL') or "https://peakerr.com/api/v2"
 API_KEY = get_setting('API_KEY') or "0d062fe0a9a42280c59cdab4166fbf92"
 gift_points = int(get_setting("gift_points") or 10)
 daily_gift_points = gift_points
+charge_description = get_setting("charge_description") or "شحن النقاط عبر"
 
 # تعريف الحالات لـ ConversationHandler
 STATES = {
@@ -145,17 +146,17 @@ def زر(update: Update, context) -> None:
         else:
             الاستفسار.edit_message_text("حدث خطأ. الخدمة غير موجودة.")
 
-    elif الاستفسار.data == 'إضافة خدمة' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'إضافة خدمة' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text("أدخل اسم الخدمة:")
         context.user_data['state'] = STATES['NAME']
         return STATES['NAME']
 
-    elif الاستفسار.data == 'شحن نقاط للمستخدم' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'شحن نقاط للمستخدم' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
         context.user_data['state'] = STATES['ADD_POINTS_USER']
         return STATES['ADD_POINTS_USER']
 
-    elif الاستفسار.data == 'خصم النقاط' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'خصم النقاط' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
         context.user_data['state'] = STATES['DEDUCT_POINTS_USER']
         return STATES['DEDUCT_POINTS_USER']
@@ -163,27 +164,27 @@ def زر(update: Update, context) -> None:
     elif الاستفسار.data == 'شحن النقاط':
         الاستفسار.edit_message_text(text=charge_description + "\n@channel_or_user")
     
-    elif الاستفسار.data == 'تحديد وصف شحن النقاط' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'تحديد وصف شحن النقاط' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text(text="أدخل الوصف الجديد لشحن النقاط:")
         context.user_data['state'] = STATES['SET_DESCRIPTION']
         return STATES['SET_DESCRIPTION']
 
-    elif الاستفسار.data == 'تعيين أدمن' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'تعيين أدمن' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد تعيينه كأدمن:")
         context.user_data['state'] = STATES['SET_ADMIN_USER']
         return STATES['SET_ADMIN_USER']
 
-    elif الاستفسار.data == 'إزالة أدمن' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'إزالة أدمن' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد إزالته من قائمة الأدمن:")
         context.user_data['state'] = STATES['REMOVE_ADMIN_USER']
         return STATES['REMOVE_ADMIN_USER']
 
-    elif الاستفسار.data == 'تغيير API' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'تغيير API' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text("أدخل API_BASE_URL الجديد:")
         context.user_data['state'] = STATES['SET_API_DETAILS']
         return STATES['SET_API_DETAILS']
 
-    elif الاستفسار.data == 'الإعدادات' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'الإعدادات' and str(update.callback_query.from_user.id) in get_admins():
         لوحة_الإعدادات = [
             [InlineKeyboardButton("➕ إضافة خدمة", callback_data='إضافة خدمة')],
             [InlineKeyboardButton("🔼 شحن نقاط للمستخدم", callback_data='شحن نقاط للمستخدم')],
@@ -239,7 +240,7 @@ def زر(update: Update, context) -> None:
         else:
             الاستفسار.edit_message_text("لم يتم العثور على تفاصيل الطلب.")
 
-    elif الاستفسار.data == 'تحديد نقاط الهدية' and الاستفسار.from_user.id in get_admins():
+    elif الاستفسار.data == 'تحديد نقاط الهدية' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text(text="أدخل عدد النقاط للهدية:")
         context.user_data['state'] = STATES['SET_GIFT_POINTS']
         return STATES['SET_GIFT_POINTS']
