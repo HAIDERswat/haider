@@ -53,6 +53,13 @@ def get_admins():
     conn.close()
     return admins
 
+def remove_admin(user_id):
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
 def set_setting(key, value):
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
