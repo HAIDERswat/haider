@@ -1,5 +1,4 @@
 import requests
-import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters
 from datetime import datetime, timedelta
@@ -17,6 +16,8 @@ add_admin(ADMIN_ID)
 # قراءة الإعدادات من قاعدة البيانات
 API_BASE_URL = get_setting('API_BASE_URL') or "https://peakerr.com/api/v2"
 API_KEY = get_setting('API_KEY') or "0d062fe0a9a42280c59cdab4166fbf92"
+gift_points = int(get_setting("gift_points") or 10)
+daily_gift_points = gift_points
 
 # تعريف الحالات لـ ConversationHandler
 STATES = {
@@ -88,7 +89,7 @@ def ابدأ(update: Update, context) -> None:
         [InlineKeyboardButton("🔍 تتبع الطلب", callback_data='تتبع الطلب')],
         [InlineKeyboardButton("💳 شحن النقاط", callback_data='شحن النقاط')],
     ]
-    if user_id in get_admins():
+    if str(user_id) in get_admins():
         لوحة_الأزرار.append([InlineKeyboardButton("⚙️ الإعدادات", callback_data='الإعدادات')])
 
     رد_اللوحة = InlineKeyboardMarkup(لوحة_الأزرار)
@@ -217,7 +218,7 @@ def زر(update: Update, context) -> None:
     elif الاستفسار.data.startswith('order_'):
         order_id = الاستفسار.data.split('_')[1]
         user_id = الاستفسار.from_user.id
-        orders = [order for user, user_orders_list in get_user_orders().items() for order in user_orders_list if order['order_id'] == order_id]
+        orders = [order for order in get_user_orders(user_id) if order['order_id'] == order_id]
         if orders:
             order = orders[0]
             # تحديث حالة الطلب من API
@@ -279,7 +280,7 @@ def زر(update: Update, context) -> None:
 
     elif الاستفسار.data == 'قائمة المستخدمين والطلبات':
         total_users = len(get_all_users())
-        total_orders = sum(len(orders) for orders in get_user_orders().values())
+        total_orders = sum(len(get_user_orders(user_id)) for user_id in get_all_users())
         نص = (f"📊 قائمة المستخدمين والطلبات:\n\n"
                 f"🔢 إجمالي المستخدمين: {total_users}\n"
                 f"📦 إجمالي الطلبات: {total_orders}")
@@ -308,7 +309,7 @@ def زر(update: Update, context) -> None:
 def admin_add_service(update, context) -> None:
     text = update.message.text
     user_id = update.message.from_user.id
-    if user_id not in get_admins():
+    if str(user_id) not in get_admins():
         update.message.reply_text("أنت لست مشرف البوت!")
         return ConversationHandler.END
 
@@ -413,7 +414,7 @@ def track_order(update, context) -> None:
     text = update.message.text
     order_id = text
     user_id = update.message.from_user.id
-    orders = [order for user, user_orders_list in get_user_orders().items() for order in user_orders_list if order['order_id'] == order_id]
+    orders = [order for order in get_user_orders(user_id) if order['order_id'] == order_id]
     if orders:
         order = orders[0]
         # تحديث حالة الطلب من API
@@ -528,7 +529,7 @@ def set_admin_user(update, context) -> None:
                 user_id = user['id']
                 break
     if user_id:
-        if user_id not in get_admins():
+        if str(user_id) not in get_admins():
             add_admin(user_id)
             update.message.reply_text(f"تم تعيين {user_id} كأدمن.")
         else:
@@ -548,7 +549,7 @@ def remove_admin_user(update, context) -> None:
                 user_id = user['id']
                 break
     if user_id:
-        if user_id in get_admins():
+        if str(user_id) in get_admins():
             remove_admin(user_id)
             update.message.reply_text(f"تم إزالة {user_id} من قائمة الأدمن.")
         else:
