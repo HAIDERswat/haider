@@ -43,7 +43,8 @@ STATES = {
     'SET_ADMIN_USER': 18,
     'REMOVE_ADMIN_USER': 19,
     'SET_DESCRIPTION': 20,
-    'SET_API_DETAILS': 21
+    'SET_API_DETAILS': 21,
+    'REMOVE_SERVICE': 22
 }
 
 CATEGORY_MAP = {
@@ -151,6 +152,11 @@ def زر(update: Update, context) -> None:
         context.user_data['state'] = STATES['NAME']
         return STATES['NAME']
 
+    elif الاستفسار.data == 'حذف خدمة' and str(update.callback_query.from_user.id) in get_admins():
+        الاستفسار.edit_message_text("أدخل معرف الخدمة التي تريد حذفها:")
+        context.user_data['state'] = STATES['REMOVE_SERVICE']
+        return STATES['REMOVE_SERVICE']
+
     elif الاستفسار.data == 'شحن نقاط للمستخدم' and str(update.callback_query.from_user.id) in get_admins():
         الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
         context.user_data['state'] = STATES['ADD_POINTS_USER']
@@ -187,6 +193,7 @@ def زر(update: Update, context) -> None:
     elif الاستفسار.data == 'الإعدادات' and str(update.callback_query.from_user.id) in get_admins():
         لوحة_الإعدادات = [
             [InlineKeyboardButton("➕ إضافة خدمة", callback_data='إضافة خدمة')],
+            [InlineKeyboardButton("❌ حذف خدمة", callback_data='حذف خدمة')],
             [InlineKeyboardButton("🔼 شحن نقاط للمستخدم", callback_data='شحن نقاط للمستخدم')],
             [InlineKeyboardButton("🔽 خصم النقاط", callback_data='خصم النقاط')],
             [InlineKeyboardButton("🎁 تحديد نقاط الهدية", callback_data='تحديد نقاط الهدية')],
@@ -377,6 +384,16 @@ def add_service_to_category(update, context) -> None:
         'description': context.user_data['description']
     }
     query.edit_message_text("تم إضافة الخدمة بنجاح!")
+    return ConversationHandler.END
+
+def remove_service(update, context) -> None:
+    text = update.message.text
+    for category, category_services in services.items():
+        if text in category_services:
+            del category_services[text]
+            update.message.reply_text("تم حذف الخدمة بنجاح!")
+            return ConversationHandler.END
+    update.message.reply_text("لم يتم العثور على الخدمة.")
     return ConversationHandler.END
 
 def add_order(update, context) -> None:
@@ -595,6 +612,7 @@ def الرئيسي() -> None:
             STATES['MAX']: [MessageHandler(Filters.text & ~Filters.command, admin_add_service)],
             STATES['DESCRIPTION']: [MessageHandler(Filters.text & ~Filters.command, admin_add_service)],
             STATES['ADD_SERVICE']: [CallbackQueryHandler(add_service_to_category, pattern='خدمات_.*')],
+            STATES['REMOVE_SERVICE']: [MessageHandler(Filters.text & ~Filters.command, remove_service)],
             STATES['SELECT_SERVICE']: [MessageHandler(Filters.text & ~Filters.command, add_order)],
             STATES['QUANTITY']: [MessageHandler(Filters.text & ~Filters.command, add_order)],
             STATES['LINK']: [MessageHandler(Filters.text & ~Filters.command, add_order)],
