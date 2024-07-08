@@ -52,6 +52,14 @@ CATEGORY_MAP = {
     'خدمات_يوتيوب': 'youtube'
 }
 
+services = {
+    'instagram': {},
+    'telegram': {},
+    'tiktok': {},
+    'facebook': {},
+    'youtube': {}
+}
+
 def ابدأ(update: Update, context) -> None:
     user_id = update.message.from_user.id
     username = update.message.from_user.username
@@ -366,9 +374,6 @@ def add_service_to_category(update, context) -> None:
         'max': context.user_data['max'],
         'description': context.user_data['description']
     }
-    with shelve.open("bot_data") as db:
-        db["services"] = services
-    print(f"Service added to {category}: {services[category][service_id]}")  # طباعة للتصحيح
     query.edit_message_text("تم إضافة الخدمة بنجاح!")
     return ConversationHandler.END
 
