@@ -1,65 +1,21 @@
 import requests
-import shelve
+import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.ext import ConversationHandler
 from datetime import datetime, timedelta
+from database import create_tables, add_admin, get_admins, set_setting, get_setting
 
-# استخدام shelve لتخزين البيانات بشكل دائم
-with shelve.open("bot_data") as db:
-    if "services" not in db:
-        db["services"] = {
-            'instagram': {},
-            'telegram': {},
-            'tiktok': {},
-            'facebook': {},
-            'youtube': {}
-        }
-    services = db["services"]
-    
-    if "user_points" not in db:
-        db["user_points"] = {}
-    user_points = db["user_points"]
-    
-    if "user_orders" not in db:
-        db["user_orders"] = {}
-    user_orders = db["user_orders"]
-    
-    if "gift_points" not in db:
-        db["gift_points"] = 10
-    gift_points = db["gift_points"]
-    
-    if "daily_gift_points" not in db:
-        db["daily_gift_points"] = 10
-    daily_gift_points = db["daily_gift_points"]
-    
-    if "referral_points" not in db:
-        db["referral_points"] = 5
-    referral_points = db["referral_points"]
-    
-    if "user_daily_gift" not in db:
-        db["user_daily_gift"] = {}
-    user_daily_gift = db["user_daily_gift"]
-    
-    if "user_joined_channels" not in db:
-        db["user_joined_channels"] = {}
-    user_joined_channels = db["user_joined_channels"]
-    
-    if "admins" not in db:
-        db["admins"] = [6726412293]  # ضع معرف الإدمن هنا
-    admins = db["admins"]
-    
-    if "charge_description" not in db:
-        db["charge_description"] = "لشحن النقاط، يرجى الضغط على الرابط التالي:"
-    charge_description = db["charge_description"]
-    
-    if "API_BASE_URL" not in db:
-        db["API_BASE_URL"] = "https://peakerr.com/api/v2"
-    API_BASE_URL = db["API_BASE_URL"]
-    
-    if "API_KEY" not in db:
-        db["API_KEY"] = "0d062fe0a9a42280c59cdab4166fbf92"
-    API_KEY = db["API_KEY"]
+# إنشاء الجداول في قاعدة البيانات
+create_tables()
+
+# إضافة الأدمن الرئيسي
+ADMIN_ID = 6726412293
+add_admin(ADMIN_ID)
+
+# قراءة الإعدادات من قاعدة البيانات
+API_BASE_URL = get_setting('API_BASE_URL') or "https://peakerr.com/api/v2"
+API_KEY = get_setting('API_KEY') or "0d062fe0a9a42280c59cdab4166fbf92"
 
 # تعريف الحالات لـ ConversationHandler
 STATES = {
@@ -103,13 +59,11 @@ async def ابدأ(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args:
         referrer_id = context.args[0]
         if referrer_id != str(user_id):  # تأكد من أن المستخدم الجديد ليس نفس الشخص الذي شارك الرابط
-            referrer_points = user_points.get(referrer_id, 0)
-            user_points[referrer_id] = referrer_points + referral_points  # إضافة نقاط للمستخدم المحيل
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
+            referrer_points = get_user_points(referrer_id)
+            set_user_points(referrer_id, referrer_points + referral_points)  # إضافة نقاط للمستخدم المحيل
             await update.message.reply_text(f"لقد انضممت عبر رابط إحالة! تم إضافة {referral_points} نقاط للمستخدم الذي أحالك.")
 
-    points = user_points.get(str(user_id), 0)
+    points = get_user_points(str(user_id))
 
     معلومات_النص = (
         f"🆔 المعرف: {user_id}\n"
@@ -125,7 +79,7 @@ async def ابدأ(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("🔍 تتبع الطلب", callback_data='تتبع الطلب')],
         [InlineKeyboardButton("💳 شحن النقاط", callback_data='شحن النقاط')],
     ]
-    if user_id in admins:
+    if user_id in get_admins():
         لوحة_الأزرار.append([InlineKeyboardButton("⚙️ الإعدادات", callback_data='الإعدادات')])
 
     رد_اللوحة = InlineKeyboardMarkup(لوحة_الأزرار)
@@ -181,17 +135,17 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await الاستفسار.edit_message_text("حدث خطأ. الخدمة غير موجودة.")
 
-    elif الاستفسار.data == 'إضافة خدمة' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'إضافة خدمة' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text("أدخل اسم الخدمة:")
         context.user_data['state'] = STATES['NAME']
         return STATES['NAME']
 
-    elif الاستفسار.data == 'شحن نقاط للمستخدم' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'شحن نقاط للمستخدم' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
         context.user_data['state'] = STATES['ADD_POINTS_USER']
         return STATES['ADD_POINTS_USER']
 
-    elif الاستفسار.data == 'خصم النقاط' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'خصم النقاط' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
         context.user_data['state'] = STATES['DEDUCT_POINTS_USER']
         return STATES['DEDUCT_POINTS_USER']
@@ -199,27 +153,27 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif الاستفسار.data == 'شحن النقاط':
         await الاستفسار.edit_message_text(text=charge_description + "\n@channel_or_user")
     
-    elif الاستفسار.data == 'تحديد وصف شحن النقاط' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'تحديد وصف شحن النقاط' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text(text="أدخل الوصف الجديد لشحن النقاط:")
         context.user_data['state'] = STATES['SET_DESCRIPTION']
         return STATES['SET_DESCRIPTION']
 
-    elif الاستفسار.data == 'تعيين أدمن' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'تعيين أدمن' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد تعيينه كأدمن:")
         context.user_data['state'] = STATES['SET_ADMIN_USER']
         return STATES['SET_ADMIN_USER']
 
-    elif الاستفسار.data == 'إزالة أدمن' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'إزالة أدمن' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد إزالته من قائمة الأدمن:")
         context.user_data['state'] = STATES['REMOVE_ADMIN_USER']
         return STATES['REMOVE_ADMIN_USER']
 
-    elif الاستفسار.data == 'تغيير API' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'تغيير API' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text("أدخل API_BASE_URL الجديد:")
         context.user_data['state'] = STATES['SET_API_DETAILS']
         return STATES['SET_API_DETAILS']
 
-    elif الاستفسار.data == 'الإعدادات' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'الإعدادات' and الاستفسار.from_user.id in get_admins():
         لوحة_الإعدادات = [
             [InlineKeyboardButton("➕ إضافة خدمة", callback_data='إضافة خدمة')],
             [InlineKeyboardButton("🔼 شحن نقاط للمستخدم", callback_data='شحن نقاط للمستخدم')],
@@ -236,7 +190,7 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     elif الاستفسار.data == 'الطلبات':
         user_id = الاستفسار.from_user.id
-        orders = user_orders.get(str(user_id), [])
+        orders = get_user_orders(str(user_id))
         if orders:
             order_texts = [f"طلب {order['order_id']}: {order['service']} - {order['quantity']}" for order in orders]
             نص = "\n".join(order_texts)
@@ -254,7 +208,7 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif الاستفسار.data.startswith('order_'):
         order_id = الاستفسار.data.split('_')[1]
         user_id = الاستفسار.from_user.id
-        orders = [order for user, user_orders_list in user_orders.items() for order in user_orders_list if order['order_id'] == order_id]
+        orders = [order for user, user_orders_list in get_user_orders().items() for order in user_orders_list if order['order_id'] == order_id]
         if orders:
             order = orders[0]
             # تحديث حالة الطلب من API
@@ -275,7 +229,7 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             await الاستفسار.edit_message_text("لم يتم العثور على تفاصيل الطلب.")
 
-    elif الاستفسار.data == 'تحديد نقاط الهدية' and الاستفسار.from_user.id in admins:
+    elif الاستفسار.data == 'تحديد نقاط الهدية' and الاستفسار.from_user.id in get_admins():
         await الاستفسار.edit_message_text(text="أدخل عدد النقاط للهدية:")
         context.user_data['state'] = STATES['SET_GIFT_POINTS']
         return STATES['SET_GIFT_POINTS']
@@ -284,7 +238,7 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         confirm_data = الاستفسار.data.split('_')[1]
         if confirm_data == 'yes':
             user_id = الاستفسار.from_user.id
-            points = user_points.get(str(user_id), 0)
+            points = get_user_points(str(user_id))
             total_price = context.user_data['total_price']
             if points >= total_price:
                 data = {
@@ -297,17 +251,14 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 response = requests.post(f"{API_BASE_URL}", data=data)
                 if response.status_code == 200:
                     order = response.json()
-                    user_points[str(user_id)] -= total_price
-                    user_orders.setdefault(str(user_id), []).append({
+                    set_user_points(str(user_id), points - total_price)
+                    add_user_order(str(user_id), {
                         'order_id': order['order'],
                         'service': services[context.user_data['current_category']][context.user_data['service_id']]['name'],
                         'quantity': context.user_data['quantity'],
                         'status': 'pending'  # الحالة الافتراضية للطلب الجديد
                     })
-                    with shelve.open("bot_data") as db:
-                        db["user_points"] = user_points
-                        db["user_orders"] = user_orders
-                    النص = f"تم إضافة الطلب بنجاح! معرف الطلب: {order['order']}\nالنقاط المتبقية: {user_points[str(user_id)]}"
+                    النص = f"تم إضافة الطلب بنجاح! معرف الطلب: {order['order']}\nالنقاط المتبقية: {get_user_points(str(user_id))}"
                 else:
                     النص = "حدث خطأ أثناء إضافة الطلب."
             else:
@@ -318,8 +269,8 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return ConversationHandler.END
 
     elif الاستفسار.data == 'قائمة المستخدمين والطلبات':
-        total_users = len(user_points)
-        total_orders = sum(len(orders) for orders in user_orders.values())
+        total_users = len(get_all_users())
+        total_orders = sum(len(orders) for orders in get_user_orders().values())
         نص = (f"📊 قائمة المستخدمين والطلبات:\n\n"
                 f"🔢 إجمالي المستخدمين: {total_users}\n"
                 f"📦 إجمالي الطلبات: {total_orders}")
@@ -335,22 +286,20 @@ async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif الاستفسار.data == 'الهدية':
         user_id = الاستفسار.from_user.id
         now = datetime.now()
-        last_gift_time = user_daily_gift.get(user_id)
+        last_gift_time = get_last_gift_time(user_id)
         if last_gift_time and now - last_gift_time < timedelta(hours=24):
             remaining_time = timedelta(hours=24) - (now - last_gift_time)
             await الاستفسار.edit_message_text(f"لقد حصلت على الهدية اليومية بالفعل. الرجاء المحاولة بعد {remaining_time}.")
         else:
-            user_points[str(user_id)] = user_points.get(str(user_id), 0) + daily_gift_points
-            user_daily_gift[user_id] = now
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
-                db["user_daily_gift"] = user_daily_gift
-            await الاستفسار.edit_message_text(f"تم منحك {daily_gift_points} نقاط كهدية يومية. النقاط الحالية: {user_points[str(user_id)]}")
+            points = get_user_points(str(user_id))
+            set_user_points(str(user_id), points + daily_gift_points)
+            set_last_gift_time(user_id, now)
+            await الاستفسار.edit_message_text(f"تم منحك {daily_gift_points} نقاط كهدية يومية. النقاط الحالية: {get_user_points(str(user_id))}")
 
 async def admin_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
     user_id = update.message.from_user.id
-    if user_id not in admins:
+    if user_id not in get_admins():
         await update.message.reply_text("أنت لست مشرف البوت!")
         return ConversationHandler.END
 
@@ -458,7 +407,7 @@ async def track_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text
     order_id = text
     user_id = update.message.from_user.id
-    orders = [order for user, user_orders_list in user_orders.items() for order in user_orders_list if order['order_id'] == order_id]
+    orders = [order for user, user_orders_list in get_user_orders().items() for order in user_orders_list if order['order_id'] == order_id]
     if orders:
         order = orders[0]
         # تحديث حالة الطلب من API
@@ -506,10 +455,8 @@ async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     elif state == STATES['ADD_POINTS_AMOUNT']:
         user_id = context.user_data['user_id']
         points = int(text)
-        user_points[str(user_id)] = user_points.get(str(user_id), 0) + points
-        with shelve.open("bot_data") as db:
-            db["user_points"] = user_points
-        await update.message.reply_text(f"تم شحن {points} نقاط للمستخدم {user_id}.\nالنقاط الحالية: {user_points[str(user_id)]}")
+        set_user_points(str(user_id), get_user_points(str(user_id)) + points)
+        await update.message.reply_text(f"تم شحن {points} نقاط للمستخدم {user_id}.\nالنقاط الحالية: {get_user_points(str(user_id))}")
         return ConversationHandler.END
 
 async def deduct_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -538,11 +485,9 @@ async def deduct_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif state == STATES['DEDUCT_POINTS_AMOUNT']:
         user_id = context.user_data['user_id']
         points = int(text)
-        if user_points.get(str(user_id), 0) >= points:
-            user_points[str(user_id)] -= points
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
-            await update.message.reply_text(f"تم خصم {points} نقاط من المستخدم {user_id}.\nالنقاط الحالية: {user_points[str(user_id)]}")
+        if get_user_points(str(user_id)) >= points:
+            set_user_points(str(user_id), get_user_points(str(user_id)) - points)
+            await update.message.reply_text(f"تم خصم {points} نقاط من المستخدم {user_id}.\nالنقاط الحالية: {get_user_points(str(user_id))}")
         else:
             await update.message.reply_text("النقاط غير كافية للخصم.")
         return ConversationHandler.END
@@ -553,8 +498,7 @@ async def set_gift_points(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         points = int(text)
         global gift_points
         gift_points = points
-        with shelve.open("bot_data") as db:
-            db["gift_points"] = gift_points
+        set_setting("gift_points", str(gift_points))
         await update.message.reply_text(f"تم تعيين نقاط الهدية إلى {points} نقاط.")
     except ValueError:
         await update.message.reply_text("الرجاء إدخال عدد صحيح.")
@@ -563,8 +507,7 @@ async def set_gift_points(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def set_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global charge_description
     charge_description = update.message.text
-    with shelve.open("bot_data") as db:
-        db["charge_description"] = charge_description
+    set_setting("charge_description", charge_description)
     await update.message.reply_text("تم تعيين الوصف الجديد لشحن النقاط.")
     return ConversationHandler.END
 
@@ -579,10 +522,8 @@ async def set_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_id = user['id']
                 break
     if user_id:
-        if user_id not in admins:
-            admins.append(user_id)
-            with shelve.open("bot_data") as db:
-                db["admins"] = admins
+        if user_id not in get_admins():
+            add_admin(user_id)
             await update.message.reply_text(f"تم تعيين {user_id} كأدمن.")
         else:
             await update.message.reply_text(f"{user_id} هو بالفعل أدمن.")
@@ -601,10 +542,8 @@ async def remove_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 user_id = user['id']
                 break
     if user_id:
-        if user_id in admins:
-            admins.remove(user_id)
-            with shelve.open("bot_data") as db:
-                db["admins"] = admins
+        if user_id in get_admins():
+            remove_admin(user_id)
             await update.message.reply_text(f"تم إزالة {user_id} من قائمة الأدمن.")
         else:
             await update.message.reply_text(f"{user_id} ليس أدمن.")
@@ -623,9 +562,8 @@ async def set_api_details_step_1(update: Update, context: ContextTypes.DEFAULT_T
 async def set_api_details_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global API_KEY
     API_KEY = update.message.text
-    with shelve.open("bot_data") as db:
-        db["API_BASE_URL"] = API_BASE_URL
-        db["API_KEY"] = API_KEY
+    set_setting("API_BASE_URL", API_BASE_URL)
+    set_setting("API_KEY", API_KEY)
     await update.message.reply_text("تم تعيين API_BASE_URL و API_KEY الجديدين.")
     return ConversationHandler.END
 
