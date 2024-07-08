@@ -3,7 +3,9 @@ import sqlite3
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters
 from datetime import datetime, timedelta
-from database import create_tables, add_admin, get_admins, set_setting, get_setting
+from database import (create_tables, add_admin, get_admins, set_setting, get_setting,
+                      get_user_points, set_user_points, add_user_order, get_user_orders,
+                      get_all_users, get_last_gift_time, set_last_gift_time)
 
 # إنشاء الجداول في قاعدة البيانات
 create_tables()
