@@ -1,679 +1,1038 @@
-import requests
-import shelve
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from telegram.ext import ConversationHandler
+import telebot
+import random
+import time
+from instagrapi import Client
+from instagrapi.exceptions import ClientError, LoginRequired, UserNotFound, ClientUnauthorizedError, FeedbackRequired
+import threading
+import sqlite3
 from datetime import datetime, timedelta
+import os
+import logging
+from queue import Queue
+import requests
+from requests.exceptions import ProxyError
 
-# استخدام shelve لتخزين البيانات بشكل دائم
-with shelve.open("bot_data") as db:
-    if "services" not in db:
-        db["services"] = {
-            'instagram': {},
-            'telegram': {},
-            'tiktok': {},
-            'facebook': {},
-            'youtube': {}
-        }
-    services = db["services"]
-    
-    if "user_points" not in db:
-        db["user_points"] = {}
-    user_points = db["user_points"]
-    
-    if "user_orders" not in db:
-        db["user_orders"] = {}
-    user_orders = db["user_orders"]
-    
-    if "gift_points" not in db:
-        db["gift_points"] = 10
-    gift_points = db["gift_points"]
-    
-    if "daily_gift_points" not in db:
-        db["daily_gift_points"] = 10
-    daily_gift_points = db["daily_gift_points"]
-    
-    if "referral_points" not in db:
-        db["referral_points"] = 5
-    referral_points = db["referral_points"]
-    
-    if "user_daily_gift" not in db:
-        db["user_daily_gift"] = {}
-    user_daily_gift = db["user_daily_gift"]
-    
-    if "user_joined_channels" not in db:
-        db["user_joined_channels"] = {}
-    user_joined_channels = db["user_joined_channels"]
-    
-    if "admins" not in db:
-        db["admins"] = [6726412293]  # ضع معرف الإدمن هنا
-    admins = db["admins"]
-    
-    if "charge_description" not in db:
-        db["charge_description"] = "لشحن النقاط، يرجى الضغط على الرابط التالي:"
-    charge_description = db["charge_description"]
-    
-    if "API_BASE_URL" not in db:
-        db["API_BASE_URL"] = "https://peakerr.com/api/v2"
-    API_BASE_URL = db["API_BASE_URL"]
-    
-    if "API_KEY" not in db:
-        db["API_KEY"] = "0d062fe0a9a42280c59cdab4166fbf92"
-    API_KEY = db["API_KEY"]
+# إعدادات تسجيل الدخول إلى إنستغرام والإعدادات الأخرى
+INSTAGRAM_USERNAME = 'rjy.u'
+INSTAGRAM_PASSWORD = 'haider123456@'
+SESSION_FILE = 'insta_session.json'
+OWN_USERNAME = 'rjy.u'
 
-# تعريف الحالات لـ ConversationHandler
-STATES = {
-    'NAME': 0,
-    'ID': 1,
-    'PRICE': 2,
-    'MIN': 3,
-    'MAX': 4,
-    'DESCRIPTION': 5,
-    'SELECT_CATEGORY': 6,
-    'ADD_SERVICE': 7,
-    'SELECT_SERVICE': 8,
-    'QUANTITY': 9,
-    'LINK': 10,
-    'CONFIRM': 11,
-    'ADD_POINTS_USER': 12,
-    'ADD_POINTS_AMOUNT': 13,
-    'SET_GIFT_POINTS': 14,
-    'DEDUCT_POINTS_USER': 15,
-    'DEDUCT_POINTS_AMOUNT': 16,
-    'TRACK_ORDER': 17,
-    'SET_ADMIN_USER': 18,
-    'REMOVE_ADMIN_USER': 19,
-    'SET_DESCRIPTION': 20,
-    'SET_API_DETAILS': 21
-}
+DATABASE_FILE = 'shared_bot_database.db'
+PROXY_API_URL = 'https://proxy.webshare.io/api/v2/proxy/list/download/mgcreuafncsrkgfffmtjusbxkwsafayolabsogxu/EG/any/username/direct/-/'
+proxies = []
+operation_count = 0
+sent_accounts_count = 0
+check_limit = 10
+unfollow_limit = 0
 
-CATEGORY_MAP = {
-    'خدمات_إنستا': 'instagram',
-    'خدمات_تليجرام': 'telegram',
-    'خدمات_تيك_توك': 'tiktok',
-    'خدمات_فيسبوك': 'facebook',
-    'خدمات_يوتيوب': 'youtube'
-}
+LOGGING_CHAT_ID = -4291371585
+ADMIN_CHAT_ID = -1002178940580
+NON_CONDITIONS_GROUP_CHAT_ID = -4263817165
+FOLLOW_SUCCESS_CHAT_ID = -4282848741
+TELEGRAM_TOKEN = '7134723898:AAEGBQ9arhKW4ewWdZjet2PCJBrSRxyAw9g'
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-async def ابدأ(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
+cl = Client()
 
-    # تحقق من وجود معرف المستخدم المحيل في الرسالة
-    if context.args:
-        referrer_id = context.args[0]
-        if referrer_id != str(user_id):  # تأكد من أن المستخدم الجديد ليس نفس الشخص الذي شارك الرابط
-            referrer_points = user_points.get(referrer_id, 0)
-            user_points[referrer_id] = referrer_points + referral_points  # إضافة نقاط للمستخدم المحيل
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
-            await update.message.reply_text(f"لقد انضممت عبر رابط إحالة! تم إضافة {referral_points} نقاط للمستخدم الذي أحالك.")
+# قائمة المتابعين المخزنة
+following_accounts = []
 
-    points = user_points.get(str(user_id), 0)
+# قفل لتجنب الوصول المتزامن لنفس الحساب
+lock = threading.Lock()
 
-    معلومات_النص = (
-        f"🆔 المعرف: {user_id}\n"
-        f"👤 اسم المستخدم: @{username}\n"
-        f"💸 النقاط: {points}\n\n"
-    )
+# تهيئة متغيرات التشغيل المتعدد
+bot_thread = None
+running = False
+paused = False
+serial_number = 0
+feedback_required = False
+retry_queue = Queue()
+follow_thread = None
+follow_running = False
+resume_checking = False
+resume_following = False
+unfollow_running = False
 
-    لوحة_الأزرار = [
-        [InlineKeyboardButton("🛍 الخدمات", callback_data='الخدمات')],
-        [InlineKeyboardButton("📦 الطلبات", callback_data='الطلبات')],
-        [InlineKeyboardButton("🎁 الهدية", callback_data='الهدية')],
-        [InlineKeyboardButton("📊 قائمة المستخدمين والطلبات", callback_data='قائمة المستخدمين والطلبات')],
-        [InlineKeyboardButton("🔍 تتبع الطلب", callback_data='تتبع الطلب')],
-        [InlineKeyboardButton("💳 شحن النقاط", callback_data='شحن النقاط')],
-    ]
-    if user_id in admins:
-        لوحة_الأزرار.append([InlineKeyboardButton("⚙️ الإعدادات", callback_data='الإعدادات')])
+scheduled_unfollow_time = None
+unfollow_timer_thread = None
 
-    رد_اللوحة = InlineKeyboardMarkup(لوحة_الأزرار)
-    await update.message.reply_text(معلومات_النص + 'اختر الخدمة التي تريدها', reply_markup=رد_اللوحة)
+# عداد عالمي لتتبع عدد العمليات
+global_operation_count = 0
 
-async def زر(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    الاستفسار = update.callback_query
-    await الاستفسار.answer()
+# محولات مخصصة لـ SQLite
+def adapt_datetime(ts):
+    return ts.isoformat()
 
-    if الاستفسار.data == 'الخدمات':
-        لوحة_الخدمات = [
-            [InlineKeyboardButton("📸 خدمات إنستا", callback_data='خدمات_إنستا')],
-            [InlineKeyboardButton("💬 خدمات تليجرام", callback_data='خدمات_تليجرام')],
-            [InlineKeyboardButton("🎵 خدمات تيك توك", callback_data='خدمات_تيك_توك')],
-            [InlineKeyboardButton("📘 خدمات فيسبوك", callback_data='خدمات_فيسبوك')],
-            [InlineKeyboardButton("📺 خدمات يوتيوب", callback_data='خدمات_يوتيوب')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='رجوع_الرئيسية')]
-        ]
-        رد_الخدمات = InlineKeyboardMarkup(لوحة_الخدمات)
-        await الاستفسار.edit_message_text('اختر الخدمة التي تريدها', reply_markup=رد_الخدمات)
+def convert_datetime(ts):
+    return datetime.fromisoformat(ts.decode())
 
-    elif الاستفسار.data == 'رجوع_الرئيسية':
-        await ابدأ(update.callback_query, context)
+sqlite3.register_adapter(datetime, adapt_datetime)
+sqlite3.register_converter("timestamp", convert_datetime)
 
-    elif الاستفسار.data.startswith('خدمات_'):
-        category = CATEGORY_MAP[الاستفسار.data]
-        context.user_data['current_category'] = category
-        category_services = services.get(category.lower(), {})
-        لوحة_الخدمات = [
-            [InlineKeyboardButton(service['name'], callback_data=f"service_{category}_{id}")]
-            for id, service in category_services.items()
-        ]
-        لوحة_الخدمات.append([InlineKeyboardButton("🔙 رجوع", callback_data='الخدمات')])
-        رد_الخدمات = InlineKeyboardMarkup(لوحة_الخدمات)
-        await الاستفسار.edit_message_text('اختر الخدمة التي تريدها', reply_markup=رد_الخدمات)
-
-    elif الاستفسار.data.startswith('service_'):
-        parts = الاستفسار.data.split('_')
-        category = parts[1].lower()
-        service_id = parts[2]
-        context.user_data['service_id'] = service_id
-        service = services[category].get(service_id)
-        if service:
-            النص = (f"📌 اسم الخدمة: {service['name']}\n"
-                    f"💰 السعر لكل 1000: {service['price']}\n"
-                    f"📉 الحد الأدنى للطلب: {service['min']}\n"
-                    f"📈 الحد الأقصى للطلب: {service['max']}\n"
-                    f"📝 الوصف: {service['description']}\n\n"
-                    "أدخل العدد المطلوب:")
-            await الاستفسار.edit_message_text(text=النص)
-            context.user_data['state'] = STATES['QUANTITY']
-            return STATES['QUANTITY']
+def log_to_telegram(message):
+    try:
+        bot.send_message(LOGGING_CHAT_ID, message)
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.result.status_code == 429:
+            retry_after = int(e.result.json()['parameters']['retry_after'])
+            print(f"⚠️ تجاوزت الحد الأقصى للطلبات. إعادة المحاولة بعد {retry_after} ثانية.")
+            time.sleep(retry_after + 1)
+            bot.send_message(LOGGING_CHAT_ID, message)
+        elif e.result.status_code == 403:
+            print("❌ البوت تم إزالته من المجموعة.")
+        elif e.result.status_code == 401:
+            print("❌ خطأ غير مصرح به: رمز البوت غير صالح أو تم إلغاؤه.")
         else:
-            await الاستفسار.edit_message_text("حدث خطأ. الخدمة غير موجودة.")
+            print(f"❌ خطأ غير متوقع: {e}")
 
-    elif الاستفسار.data == 'إضافة خدمة' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text("أدخل اسم الخدمة:")
-        context.user_data['state'] = STATES['NAME']
-        return STATES['NAME']
-
-    elif الاستفسار.data == 'شحن نقاط للمستخدم' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
-        context.user_data['state'] = STATES['ADD_POINTS_USER']
-        return STATES['ADD_POINTS_USER']
-
-    elif الاستفسار.data == 'خصم النقاط' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text("أدخل معرف المستخدم أو اسم المستخدم:")
-        context.user_data['state'] = STATES['DEDUCT_POINTS_USER']
-        return STATES['DEDUCT_POINTS_USER']
-
-    elif الاستفسار.data == 'شحن النقاط':
-        await الاستفسار.edit_message_text(text=charge_description + "\n@channel_or_user")
-    
-    elif الاستفسار.data == 'تحديد وصف شحن النقاط' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text(text="أدخل الوصف الجديد لشحن النقاط:")
-        context.user_data['state'] = STATES['SET_DESCRIPTION']
-        return STATES['SET_DESCRIPTION']
-
-    elif الاستفسار.data == 'تعيين أدمن' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد تعيينه كأدمن:")
-        context.user_data['state'] = STATES['SET_ADMIN_USER']
-        return STATES['SET_ADMIN_USER']
-
-    elif الاستفسار.data == 'إزالة أدمن' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text(text="أدخل معرف المستخدم أو اسم المستخدم الذي تريد إزالته من قائمة الأدمن:")
-        context.user_data['state'] = STATES['REMOVE_ADMIN_USER']
-        return STATES['REMOVE_ADMIN_USER']
-
-    elif الاستفسار.data == 'تغيير API' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text("أدخل API_BASE_URL الجديد:")
-        context.user_data['state'] = STATES['SET_API_DETAILS']
-        return STATES['SET_API_DETAILS']
-
-    elif الاستفسار.data == 'الإعدادات' and الاستفسار.from_user.id in admins:
-        لوحة_الإعدادات = [
-            [InlineKeyboardButton("➕ إضافة خدمة", callback_data='إضافة خدمة')],
-            [InlineKeyboardButton("🔼 شحن نقاط للمستخدم", callback_data='شحن نقاط للمستخدم')],
-            [InlineKeyboardButton("🔽 خصم النقاط", callback_data='خصم النقاط')],
-            [InlineKeyboardButton("🎁 تحديد نقاط الهدية", callback_data='تحديد نقاط الهدية')],
-            [InlineKeyboardButton("💬 تحديد وصف شحن النقاط", callback_data='تحديد وصف شحن النقاط')],
-            [InlineKeyboardButton("👑 تعيين أدمن", callback_data='تعيين أدمن')],
-            [InlineKeyboardButton("🚫 إزالة أدمن", callback_data='إزالة أدمن')],
-            [InlineKeyboardButton("🔄 تغيير API", callback_data='تغيير API')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='رجوع_الرئيسية')]
-        ]
-        رد_الإعدادات = InlineKeyboardMarkup(لوحة_الإعدادات)
-        await الاستفسار.edit_message_text('الإعدادات:', reply_markup=رد_الإعدادات)
-
-    elif الاستفسار.data == 'الطلبات':
-        user_id = الاستفسار.from_user.id
-        orders = user_orders.get(str(user_id), [])
-        if orders:
-            order_texts = [f"طلب {order['order_id']}: {order['service']} - {order['quantity']}" for order in orders]
-            نص = "\n".join(order_texts)
+def send_telegram_message(chat_id, text):
+    try:
+        bot.send_message(chat_id, text)
+        time.sleep(random.uniform(1, 3))  # تأخير عشوائي بين 1-3 ثوانٍ
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.result.status_code == 429:
+            retry_after = int(e.result.json()['parameters']['retry_after'])
+            print(f"⚠️ تجاوزت الحد الأقصى للطلبات. إعادة المحاولة بعد {retry_after} ثانية.")
+            time.sleep(retry_after + 1)
+            bot.send_message(chat_id, text)
+        elif e.result.status_code == 403:
+            print("❌ البوت تم إزالته من المجموعة.")
         else:
-            نص = "لا توجد طلبات متاحة."
-        نص += "\n\nاختر الطلب لرؤية التفاصيل:"
-        لوحة_الطلبات = [
-            [InlineKeyboardButton(order['order_id'], callback_data=f"order_{order['order_id']}")]
-            for order in orders
-        ]
-        لوحة_الطلبات.append([InlineKeyboardButton("🔙 رجوع", callback_data='رجوع_الرئيسية')])
-        رد_الطلبات = InlineKeyboardMarkup(لوحة_الطلبات)
-        await الاستفسار.edit_message_text(نص, reply_markup=رد_الطلبات)
+            print(f"❌ خطأ غير متوقع: {e}")
 
-    elif الاستفسار.data.startswith('order_'):
-        order_id = الاستفسار.data.split('_')[1]
-        user_id = الاستفسار.from_user.id
-        orders = [order for user, user_orders_list in user_orders.items() for order in user_orders_list if order['order_id'] == order_id]
-        if orders:
-            order = orders[0]
-            # تحديث حالة الطلب من API
-            response = requests.get(f"{API_BASE_URL}/status", params={"key": API_KEY, "order": order_id})
-            if response.status_code == 200:
-                order_status = response.json().get('status', 'unknown')
-                order['status'] = order_status
-            else:
-                order_status = order.get('status', 'unknown')
-
-            order_status = "مكتمل" if order_status == "completed" else "ملغي" if order_status == "canceled" else "جزئي" if order_status == "partial" else "في الانتظار"
-            النص = (f"تفاصيل الطلب:\n\n"
-                    f"📦 معرف الطلب: {order['order_id']}\n"
-                    f"📌 الخدمة: {order['service']}\n"
-                    f"🔢 الكمية: {order['quantity']}\n"
-                    f"🔍 الحالة: {order_status}")
-            await الاستفسار.edit_message_text(text=النص)
+# أضف هذه الوظيفة هنا
+def format_proxy(proxy):
+    try:
+        # تقسيم البروكسي إلى الأجزاء الخاصة به
+        parts = proxy.split(':')
+        if len(parts) == 4:
+            ip = parts[0]
+            port = parts[1]
+            username = parts[2]
+            password = parts[3]
+            formatted_proxy = f"http://{username}:{password}@{ip}:{port}"
+            return formatted_proxy
         else:
-            await الاستفسار.edit_message_text("لم يتم العثور على تفاصيل الطلب.")
+            log_to_telegram(f"⚠️ تنسيق البروكسي غير صحيح: {proxy}")
+            return None
+    except Exception as e:
+        log_to_telegram(f"⚠️ خطأ في معالجة البروكسي: {proxy}, {e}")
+        return None
 
-    elif الاستفسار.data == 'تحديد نقاط الهدية' and الاستفسار.from_user.id in admins:
-        await الاستفسار.edit_message_text(text="أدخل عدد النقاط للهدية:")
-        context.user_data['state'] = STATES['SET_GIFT_POINTS']
-        return STATES['SET_GIFT_POINTS']
-
-    elif الاستفسار.data.startswith('confirm_'):
-        confirm_data = الاستفسار.data.split('_')[1]
-        if confirm_data == 'yes':
-            user_id = الاستفسار.from_user.id
-            points = user_points.get(str(user_id), 0)
-            total_price = context.user_data['total_price']
-            if points >= total_price:
-                data = {
-                    'key': API_KEY,
-                    'action': 'add',
-                    'service': context.user_data['service_id'],
-                    'link': context.user_data['link'],
-                    'quantity': context.user_data['quantity']
-                }
-                response = requests.post(f"{API_BASE_URL}", data=data)
-                if response.status_code == 200:
-                    order = response.json()
-                    user_points[str(user_id)] -= total_price
-                    user_orders.setdefault(str(user_id), []).append({
-                        'order_id': order['order'],
-                        'service': services[context.user_data['current_category']][context.user_data['service_id']]['name'],
-                        'quantity': context.user_data['quantity'],
-                        'status': 'pending'  # الحالة الافتراضية للطلب الجديد
-                    })
-                    with shelve.open("bot_data") as db:
-                        db["user_points"] = user_points
-                        db["user_orders"] = user_orders
-                    النص = f"تم إضافة الطلب بنجاح! معرف الطلب: {order['order']}\nالنقاط المتبقية: {user_points[str(user_id)]}"
-                else:
-                    النص = "حدث خطأ أثناء إضافة الطلب."
-            else:
-                النص = "ليس لديك نقاط كافية لإكمال الطلب."
-            await الاستفسار.edit_message_text(text=النص)
-        else:
-            await الاستفسار.edit_message_text("تم إلغاء الطلب.")
-        return ConversationHandler.END
-
-    elif الاستفسار.data == 'قائمة المستخدمين والطلبات':
-        total_users = len(user_points)
-        total_orders = sum(len(orders) for orders in user_orders.values())
-        نص = (f"📊 قائمة المستخدمين والطلبات:\n\n"
-                f"🔢 إجمالي المستخدمين: {total_users}\n"
-                f"📦 إجمالي الطلبات: {total_orders}")
-        لوحة_رجوع = [[InlineKeyboardButton("🔙 رجوع", callback_data='رجوع_الرئيسية')]]
-        رد_رجوع = InlineKeyboardMarkup(لوحة_رجوع)
-        await الاستفسار.edit_message_text(text=نص, reply_markup=رد_رجوع)
-
-    elif الاستفسار.data == 'تتبع الطلب':
-        await الاستفسار.edit_message_text(text="أدخل رقم الطلب:")
-        context.user_data['state'] = STATES['TRACK_ORDER']
-        return STATES['TRACK_ORDER']
-
-    elif الاستفسار.data == 'الهدية':
-        user_id = الاستفسار.from_user.id
-        now = datetime.now()
-        last_gift_time = user_daily_gift.get(user_id)
-        if last_gift_time and now - last_gift_time < timedelta(hours=24):
-            remaining_time = timedelta(hours=24) - (now - last_gift_time)
-            await الاستفسار.edit_message_text(f"لقد حصلت على الهدية اليومية بالفعل. الرجاء المحاولة بعد {remaining_time}.")
-        else:
-            user_points[str(user_id)] = user_points.get(str(user_id), 0) + daily_gift_points
-            user_daily_gift[user_id] = now
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
-                db["user_daily_gift"] = user_daily_gift
-            await الاستفسار.edit_message_text(f"تم منحك {daily_gift_points} نقاط كهدية يومية. النقاط الحالية: {user_points[str(user_id)]}")
-
-async def admin_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    user_id = update.message.from_user.id
-    if user_id not in admins:
-        await update.message.reply_text("أنت لست مشرف البوت!")
-        return ConversationHandler.END
-
-    state = context.user_data.get('state', STATES['NAME'])
-    print(f"Current state: {state}")  # رسالة للتصحيح
-
-    if state == STATES['NAME']:
-        context.user_data['service_name'] = text
-        context.user_data['state'] = STATES['ID']
-        await update.message.reply_text("أدخل معرف الخدمة:")
-        return STATES['ID']
-
-    elif state == STATES['ID']:
-        context.user_data['service_id'] = text
-        context.user_data['state'] = STATES['PRICE']
-        await update.message.reply_text("أدخل سعر الخدمة لكل 1000:")
-        return STATES['PRICE']
-
-    elif state == STATES['PRICE']:
-        context.user_data['price'] = text
-        context.user_data['state'] = STATES['MIN']
-        await update.message.reply_text("أدخل الحد الأدنى للطلب:")
-        return STATES['MIN']
-
-    elif state == STATES['MIN']:
-        context.user_data['min'] = text
-        context.user_data['state'] = STATES['MAX']
-        await update.message.reply_text("أدخل الحد الأقصى للطلب:")
-        return STATES['MAX']
-
-    elif state == STATES['MAX']:
-        context.user_data['max'] = text
-        context.user_data['state'] = STATES['DESCRIPTION']
-        await update.message.reply_text("أدخل وصف الخدمة:")
-        return STATES['DESCRIPTION']
-
-    elif state == STATES['DESCRIPTION']:
-        context.user_data['description'] = text
-        await update.message.reply_text("اختر القسم الذي تريد إضافة الخدمة إليه:")
-        لوحة_الأقسام = [
-            [InlineKeyboardButton("📸 خدمات إنستا", callback_data='خدمات_إنستا')],
-            [InlineKeyboardButton("💬 خدمات تليجرام", callback_data='خدمات_تليجرام')],
-            [InlineKeyboardButton("🎵 خدمات تيك توك", callback_data='خدمات_تيك_توك')],
-            [InlineKeyboardButton("📘 خدمات فيسبوك", callback_data='خدمات_فيسبوك')],
-            [InlineKeyboardButton("📺 خدمات يوتيوب", callback_data='خدمات_يوتيوب')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='رجوع_الرئيسية')]
-        ]
-        رد_الأقسام = InlineKeyboardMarkup(لوحة_الأقسام)
-        await update.message.reply_text('اختر القسم:', reply_markup=رد_الأقسام)
-        context.user_data['state'] = STATES['ADD_SERVICE']
-        return STATES['ADD_SERVICE']
-
-async def add_service_to_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    category_key = query.data
-    category = CATEGORY_MAP[category_key]
-    service_id = context.user_data['service_id']
-    services[category][service_id] = {
-        'name': context.user_data['service_name'],
-        'price': context.user_data['price'],
-        'min': context.user_data['min'],
-        'max': context.user_data['max'],
-        'description': context.user_data['description']
-    }
-    with shelve.open("bot_data") as db:
-        db["services"] = services
-    print(f"Service added to {category}: {services[category][service_id]}")  # طباعة للتصحيح
-    await query.edit_message_text("تم إضافة الخدمة بنجاح!")
-    return ConversationHandler.END
-
-async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    state = context.user_data.get('state')
-
-    if state == STATES['QUANTITY']:
-        try:
-            quantity = int(text)  # تحويل الكمية إلى عدد صحيح
-            service_id = context.user_data['service_id']
-            category = context.user_data['current_category']
-            service = services[category.lower()][service_id]
-            price_per_1000 = float(service['price'])
-            total_price = (quantity / 1000) * price_per_1000
-            context.user_data['quantity'] = quantity
-            context.user_data['total_price'] = total_price
-            النص = f"السعر الكلي للكمية المطلوبة ({quantity}): {total_price}\n\nأدخل رابط حسابك:"
-            await update.message.reply_text(text=النص)
-            context.user_data['state'] = STATES['LINK']
-            return STATES['LINK']
-        except ValueError:
-            await update.message.reply_text("الرجاء إدخال عدد صحيح.")
-            return STATES['QUANTITY']
-
-    elif state == STATES['LINK']:
-        context.user_data['link'] = text
-        confirm_buttons = [
-            [InlineKeyboardButton("✅ نعم", callback_data='confirm_yes')],
-            [InlineKeyboardButton("❌ لا", callback_data='confirm_no')]
-        ]
-        رد_تأكيد = InlineKeyboardMarkup(confirm_buttons)
-        await update.message.reply_text(f"تأكيد الطلب؟", reply_markup=رد_تأكيد)
-        return STATES['CONFIRM']
-
-async def track_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    order_id = text
-    user_id = update.message.from_user.id
-    orders = [order for user, user_orders_list in user_orders.items() for order in user_orders_list if order['order_id'] == order_id]
-    if orders:
-        order = orders[0]
-        # تحديث حالة الطلب من API
-        response = requests.get(f"{API_BASE_URL}/status", params={"key": API_KEY, "order": order_id})
+# استبدل هذه الوظيفة بالنسخة المعدلة
+def load_proxies_from_api():
+    global proxies
+    try:
+        response = requests.get(PROXY_API_URL)
         if response.status_code == 200:
-            order_status = response.json().get('status', 'unknown')
-            order['status'] = order_status
+            raw_proxies = response.text.strip().split('\n')
+            proxies = [format_proxy(proxy.strip()) for proxy in raw_proxies if format_proxy(proxy.strip())]
+            if proxies:
+                log_to_telegram("تم تحميل البروكسيات من الـ API بنجاح.")
+            else:
+                log_to_telegram("⚠️ لم يتم العثور على بروكسيات صالحة.")
         else:
-            order_status = order.get('status', 'unknown')
+            log_to_telegram(f"❌ حدث خطأ أثناء تحميل البروكسيات من الـ API: {response.status_code}")
+            proxies = []
+    except Exception as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء تحميل البروكسيات من الـ API: {e}")
+        proxies = []
 
-        order_status = "مكتمل" if order_status == "completed" else "ملغي" if order_status == "canceled" else "جزئي" if order_status == "partial" else "في الانتظار"
-        النص = (f"تفاصيل الطلب:\n\n"
-                f"📦 معرف الطلب: {order['order_id']}\n"
-                f"📌 الخدمة: {order['service']}\n"
-                f"🔢 الكمية: {order['quantity']}\n"
-                f"🔍 الحالة: {order_status}")
-        await update.message.reply_text(text=النص)
+def connect_to_proxy():
+    global cl, proxies, global_operation_count
+    if proxies:
+        for _ in range(len(proxies)):
+            proxy = random.choice(proxies)
+            print(f"Using proxy: {proxy}")  # طباعة البروكسي المستخدم للتصحيح
+            try:
+                cl.set_proxy(proxy)
+                log_to_telegram(f"تم الاتصال بالبروكسي: {proxy}")
+                global_operation_count = 0  # إعادة تعيين العداد بعد تغيير البروكسي
+                return  # إذا نجح الاتصال، اخرج من الدالة
+            except ValueError as ve:
+                log_to_telegram(f"خطأ في تعيين البروكسي: {ve}")
+            except requests.exceptions.ProxyError as e:
+                log_to_telegram(f"خطأ في الاتصال عبر البروكسي: {e}")
+        log_to_telegram("❌ فشل في الاتصال بجميع البروكسيات المتاحة.")
     else:
-        await update.message.reply_text("لم يتم العثور على تفاصيل الطلب.")
-    return ConversationHandler.END
+        log_to_telegram("❌ لا توجد بروكسيات متاحة للاستخدام.")
 
-async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    state = context.user_data.get('state')
+def switch_proxy_if_needed():
+    global global_operation_count
+    global_operation_count += 1
+    if global_operation_count >= 5:  # تغيير البروكسي بعد كل 5 عمليات
+        connect_to_proxy()
 
-    if state == STATES['ADD_POINTS_USER']:
-        user_id_or_username = text
-        try:
-            user_id = int(user_id_or_username)
-        except ValueError:
-            user_id = None
-            for user in context.bot_data.get('users', {}).values():
-                if user['username'] == user_id_or_username:
-                    user_id = user['id']
-                    break
-        if user_id:
-            context.user_data['user_id'] = user_id
-            context.user_data['state'] = STATES['ADD_POINTS_AMOUNT']
-            await update.message.reply_text("أدخل عدد النقاط المراد شحنها:")
-            return STATES['ADD_POINTS_AMOUNT']
-        else:
-            await update.message.reply_text("لم يتم العثور على المستخدم. الرجاء إدخال معرف المستخدم أو اسم المستخدم:")
-            return STATES['ADD_POINTS_USER']
+def save_session():
+    cl.dump_settings(SESSION_FILE)
+    log_to_telegram("✅ تم حفظ جلسة تسجيل الدخول.")
 
-    elif state == STATES['ADD_POINTS_AMOUNT']:
-        user_id = context.user_data['user_id']
-        points = int(text)
-        user_points[str(user_id)] = user_points.get(str(user_id), 0) + points
-        with shelve.open("bot_data") as db:
-            db["user_points"] = user_points
-        await update.message.reply_text(f"تم شحن {points} نقاط للمستخدم {user_id}.\nالنقاط الحالية: {user_points[str(user_id)]}")
-        return ConversationHandler.END
-
-async def deduct_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    state = context.user_data.get('state')
-
-    if state == STATES['DEDUCT_POINTS_USER']:
-        user_id_or_username = text
-        try:
-            user_id = int(user_id_or_username)
-        except ValueError:
-            user_id = None
-            for user in context.bot_data.get('users', {}).values():
-                if user['username'] == user_id_or_username:
-                    user_id = user['id']
-                    break
-        if user_id:
-            context.user_data['user_id'] = user_id
-            context.user_data['state'] = STATES['DEDUCT_POINTS_AMOUNT']
-            await update.message.reply_text("أدخل عدد النقاط المراد خصمها:")
-            return STATES['DEDUCT_POINTS_AMOUNT']
-        else:
-            await update.message.reply_text("لم يتم العثور على المستخدم. الرجاء إدخال معرف المستخدم أو اسم المستخدم:")
-            return STATES['DEDUCT_POINTS_USER']
-
-    elif state == STATES['DEDUCT_POINTS_AMOUNT']:
-        user_id = context.user_data['user_id']
-        points = int(text)
-        if user_points.get(str(user_id), 0) >= points:
-            user_points[str(user_id)] -= points
-            with shelve.open("bot_data") as db:
-                db["user_points"] = user_points
-            await update.message.reply_text(f"تم خصم {points} نقاط من المستخدم {user_id}.\nالنقاط الحالية: {user_points[str(user_id)]}")
-        else:
-            await update.message.reply_text("النقاط غير كافية للخصم.")
-        return ConversationHandler.END
-
-async def set_gift_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    try:
-        points = int(text)
-        global gift_points
-        gift_points = points
-        with shelve.open("bot_data") as db:
-            db["gift_points"] = gift_points
-        await update.message.reply_text(f"تم تعيين نقاط الهدية إلى {points} نقاط.")
-    except ValueError:
-        await update.message.reply_text("الرجاء إدخال عدد صحيح.")
-    return ConversationHandler.END
-
-async def set_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global charge_description
-    charge_description = update.message.text
-    with shelve.open("bot_data") as db:
-        db["charge_description"] = charge_description
-    await update.message.reply_text("تم تعيين الوصف الجديد لشحن النقاط.")
-    return ConversationHandler.END
-
-async def set_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id_or_username = update.message.text
-    try:
-        user_id = int(user_id_or_username)
-    except ValueError:
-        user_id = None
-        for user in context.bot_data.get('users', {}).values():
-            if user['username'] == user_id_or_username:
-                user_id = user['id']
-                break
-    if user_id:
-        if user_id not in admins:
-            admins.append(user_id)
-            with shelve.open("bot_data") as db:
-                db["admins"] = admins
-            await update.message.reply_text(f"تم تعيين {user_id} كأدمن.")
-        else:
-            await update.message.reply_text(f"{user_id} هو بالفعل أدمن.")
+def load_session():
+    if os.path.exists(SESSION_FILE):
+        cl.load_settings(SESSION_FILE)
+        log_to_telegram("✅ تم تحميل جلسة تسجيل الدخول المحفوظة.")
     else:
-        await update.message.reply_text("لم يتم العثور على المستخدم.")
-    return ConversationHandler.END
+        log_to_telegram("⚠️ لا توجد جلسة محفوظة. سيتم تسجيل الدخول من جديد.")
 
-async def remove_admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id_or_username = update.message.text
+def login_to_instagram():
     try:
-        user_id = int(user_id_or_username)
-    except ValueError:
-        user_id = None
-        for user in context.bot_data.get('users', {}).values():
-            if user['username'] == user_id_or_username:
-                user_id = user['id']
-                break
-    if user_id:
-        if user_id in admins:
-            admins.remove(user_id)
-            with shelve.open("bot_data") as db:
-                db["admins"] = admins
-            await update.message.reply_text(f"تم إزالة {user_id} من قائمة الأدمن.")
-        else:
-            await update.message.reply_text(f"{user_id} ليس أدمن.")
-    return ConversationHandler.END
+        load_session()
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        save_session()
+    except Exception as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء تسجيل الدخول: {e}")
+        if os.path.exists(SESSION_FILE):
+            os.remove(SESSION_FILE)
+            log_to_telegram("🗑️ تم حذف الجلسة المحفوظة. المحاولة مرة أخرى...")
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        save_session()
 
-async def set_api_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("أدخل API_BASE_URL الجديد:")
-    context.user_data['state'] = 'SET_API_DETAILS_STEP_1'
-
-async def set_api_details_step_1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global API_BASE_URL
-    API_BASE_URL = update.message.text
-    await update.message.reply_text("أدخل API_KEY الجديد:")
-    context.user_data['state'] = 'SET_API_DETAILS_STEP_2'
-
-async def set_api_details_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global API_KEY
-    API_KEY = update.message.text
-    with shelve.open("bot_data") as db:
-        db["API_BASE_URL"] = API_BASE_URL
-        db["API_KEY"] = API_KEY
-    await update.message.reply_text("تم تعيين API_BASE_URL و API_KEY الجديدين.")
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text('تم إلغاء العملية.')
-    return ConversationHandler.END
-
-def الرئيسي() -> None:
-    التطبيق = Application.builder().token("7043661652:AAGAfLk6Veqob5MpkCJX92_duX1UCoybQzs").build()  # استبدل YOUR_TELEGRAM_BOT_TOKEN برمز البوت الخاص بك
-
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(زر, pattern='إضافة خدمة|الخدمات|service_|شحن النقاط|شحن نقاط للمستخدم|خصم النقاط|تحديد وصف شحن النقاط|تعيين أدمن|إزالة أدمن|تغيير API|الهدية|الطلبات|تحديد نقاط الهدية|قائمة المستخدمين والطلبات|تتبع الطلب|الإعدادات'),
-        ],
-        states={
-            STATES['NAME']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['ID']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['PRICE']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['MIN']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['MAX']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['DESCRIPTION']: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_service)],
-            STATES['ADD_SERVICE']: [CallbackQueryHandler(add_service_to_category, pattern='خدمات_.*')],
-            STATES['SELECT_SERVICE']: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_order)],
-            STATES['QUANTITY']: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_order)],
-            STATES['LINK']: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_order)],
-            STATES['CONFIRM']: [CallbackQueryHandler(زر, pattern='confirm_')],
-            STATES['ADD_POINTS_USER']: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_points)],
-            STATES['ADD_POINTS_AMOUNT']: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_points)],
-            STATES['DEDUCT_POINTS_USER']: [MessageHandler(filters.TEXT & ~filters.COMMAND, deduct_points)],
-            STATES['DEDUCT_POINTS_AMOUNT']: [MessageHandler(filters.TEXT & ~filters.COMMAND, deduct_points)],
-            STATES['SET_GIFT_POINTS']: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_gift_points)],
-            STATES['SET_DESCRIPTION']: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_description)],
-            STATES['SET_ADMIN_USER']: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_admin_user)],
-            STATES['REMOVE_ADMIN_USER']: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_admin_user)],
-            STATES['SET_API_DETAILS']: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_api_details)],
-            'SET_API_DETAILS_STEP_1': [MessageHandler(filters.TEXT & ~filters.COMMAND, set_api_details_step_1)],
-            'SET_API_DETAILS_STEP_2': [MessageHandler(filters.TEXT & ~filters.COMMAND, set_api_details_step_2)],
-            STATES['TRACK_ORDER']: [MessageHandler(filters.TEXT & ~filters.COMMAND, track_order)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
+def get_db_connection():
+    return sqlite3.connect(
+        DATABASE_FILE, 
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, 
+        check_same_thread=False
     )
 
-    التطبيق.add_handler(CommandHandler("start", ابدأ))
-    التطبيق.add_handler(conv_handler)
-    التطبيق.add_handler(CallbackQueryHandler(زر))
+def create_shared_tables():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS processed_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                username TEXT,
+                followed BOOLEAN,
+                unfollowed BOOLEAN,
+                conditions_met BOOLEAN,
+                last_checked timestamp DEFAULT CURRENT_TIMESTAMP,
+                last_sent timestamp,
+                timestamp timestamp DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS serial_number (
+                id INTEGER PRIMARY KEY,
+                value INTEGER
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_unfollows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_time timestamp
+            )
+        ''')
+        conn.commit()
 
-    التطبيق.run_polling()
+def load_serial_number():
+    global serial_number
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM serial_number WHERE id = 1')
+        result = cursor.fetchone()
+        if result:
+            serial_number = result[0]
+        else:
+            cursor.execute('INSERT INTO serial_number (id, value) VALUES (1, 0)')
+            conn.commit()
+            serial_number = 0
 
-if __name__ == '__main__':
-    الرئيسي()
-  
+def update_serial_number():
+    global serial_number
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('UPDATE serial_number SET value = ? WHERE id = 1', (serial_number,))
+        conn.commit()
+
+def reset_serial_number():
+    global serial_number
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        serial_number = 0
+        cursor.execute('UPDATE serial_number SET value = ?', (serial_number,))
+        
+        # إعادة تعيين الحقول المتعلقة بالمتابعة
+        cursor.execute('''
+            UPDATE processed_users 
+            SET conditions_met = 0, followed = 0, unfollowed = 0, last_sent = NULL, last_checked = NULL 
+            WHERE conditions_met = 1 OR followed = 1
+        ''')
+        
+        conn.commit()
+    log_to_telegram("✅ تم تصفير الرقم التسلسلي وإعادة تعيين الحسابات للمتابعة.")
+
+def update_following_accounts():
+    global following_accounts
+    following_accounts = get_following_accounts(OWN_USERNAME)
+    if following_accounts:
+        log_to_telegram(f"✅ تم تحديث قائمة المتابعين لحساب {OWN_USERNAME}.")
+    else:
+        log_to_telegram(f"❌ حدث خطأ أثناء تحديث قائمة المتابعين لحساب {OWN_USERNAME}.")
+
+def get_following_accounts(username):
+    try:
+        user_id = cl.user_id_from_username(username)
+        following = cl.user_following(user_id)
+        following_usernames = [user.username for user in following.values()]
+        log_to_telegram(f"تم جلب قائمة المتابعين ({len(following_usernames)}) لحساب {username}.")
+        return following_usernames
+    except Exception as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء جلب قائمة المتابعين: {e}")
+        return []
+
+def check_following_conditions(user_id):
+    global feedback_required
+    global following_accounts  # استخدام قائمة المتابعين المخزنة
+    
+    try:
+        user_info = cl.user_info(user_id)
+        if user_info.is_private:
+            return "private"
+        following = cl.user_following(user_id)
+        following_usernames = [user.username for user in following.values()]
+        
+        matched_accounts = [account for account in following_usernames if account in following_accounts]
+        return len(matched_accounts) >= 10  # التحقق إذا كان المستخدم يتابع 10 حسابات على الأقل
+    except FeedbackRequired:
+        feedback_required = True
+        log_to_telegram("❌ feedback_required: تم تقييد الأنشطة مؤقتًا. سيتم الانتظار قبل إعادة المحاولة.")
+        return False
+    except ClientUnauthorizedError:
+        log_to_telegram("❌ الجلسة غير مصرح بها. إعادة المصادقة...")
+        login_to_instagram()
+        return False
+    except ClientError as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء فحص متابعة المستخدم: {e}")
+        return False
+
+def save_or_update_account(user_id, username, profile_url, conditions_met):
+    global serial_number
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # تحقق مما إذا كان المستخدم موجودًا بالفعل
+        cursor.execute('SELECT 1 FROM processed_users WHERE user_id = ?', (user_id,))
+        if cursor.fetchone():
+            # إذا كان المستخدم موجودًا، قم بتحديث الإدخال الموجود
+            cursor.execute('''
+                UPDATE processed_users
+                SET username = ?, conditions_met = ?, last_checked = ?, last_sent = ?
+                WHERE user_id = ?
+            ''', (username, conditions_met, datetime.now(), datetime.now() if conditions_met else None, user_id))
+        else:
+            # إذا لم يكن المستخدم موجودًا، أدخل إدخالًا جديدًا
+            cursor.execute('''
+                INSERT INTO processed_users (user_id, username, followed, unfollowed, conditions_met, last_checked, last_sent)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, username, False, False, conditions_met, datetime.now(), datetime.now() if conditions_met else None))
+        
+        conn.commit()
+
+        if conditions_met:
+            serial_number += 1
+            update_serial_number()
+            return serial_number
+        return None
+
+def can_process_or_send(user_id, within_last=48, check_reset=True):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT last_checked, last_sent FROM processed_users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        if result:
+            last_checked, last_sent = result
+            now = datetime.now()
+            if check_reset and last_sent and (now - last_sent) < timedelta(hours=within_last):
+                return False, False
+            if last_checked and (now - last_checked) < timedelta(hours=within_last):
+                return False, False
+    return True, True
+
+def send_instagram_message(user_id, text):
+    switch_proxy_if_needed()  # تبديل البروكسي إذا لزم الأمر
+    try:
+        cl.direct_send(text, [user_id])
+        return "✅ تم إرسال الرسالة بنجاح"
+    except Exception as e:
+        return f"❌ حدث خطأ أثناء إرسال الرسالة: {e}"
+
+def perform_random_activity_and_follow(user_id, username):
+    global follow_running
+    if not follow_running:
+        return False
+    
+    try:
+        switch_proxy_if_needed()  # تبديل البروكسي إذا لزم الأمر
+
+        user_info = cl.user_info(user_id)
+        if user_info.is_private:
+            log_to_telegram(f"🔒 الحساب خاص: {username}. سيتم متابعة الحساب دون أي نشاط آخر.")
+            cl.user_follow(user_id)
+            send_instagram_message(user_id, 
+                "تم إضافتك للدعم المجاني! 😍💕\n\n"
+                "1️⃣ ضيف الحسابات الجديدة التي سنقوم باضافتها قريباً ورد الإضافة لكل من يضيفك. ✔️\n\n"
+                "2️⃣ التقط صورة للإضافات التي ستحصل عليها، وانشرها كستوري مع وضع تاغ لي حتى أقوم بمشاركتها! 🙈💕\n\n"
+                "شكراً لدعمك! 🌟"
+            )
+            return True
+        
+        user_medias = cl.user_medias(user_id, amount=10)
+        if not user_medias:
+            log_to_telegram(f"📂 لا توجد منشورات في حساب المستخدم: {username}. سيتم متابعة الحساب دون أي نشاط آخر.")
+            cl.user_follow(user_id)
+            send_instagram_message(user_id, 
+                "تم إضافتك للدعم المجاني! 😍💕\n\n"
+                "1️⃣ ضيف الحسابات الجديدة التي سنقوم باضافتها قريباً ورد الإضافة لكل من يضيفك. ✔️\n\n"
+                "2️⃣ التقط صورة للإضافات التي ستحصل عليها، وانشرها كستوري مع وضع تاغ لي حتى أقوم بمشاركتها! 🙈💕\n\n"
+                "شكراً لدعمك! 🌟"
+            )
+            return True
+        
+        media_id = random.choice(user_medias).id
+        cl.media_like(media_id)
+        log_to_telegram(f"👍 تم الإعجاب بمنشور المستخدم {username}")
+        
+        cl.user_follow(user_id)
+        send_instagram_message(user_id, 
+                "تم إضافتك للدعم المجاني! 😍💕\n\n"
+                "1️⃣ ضيف الحسابات الجديدة التي سنقوم باضافتها قريباً ورد الإضافة لكل من يضيفك. ✔️\n\n"
+                "2️⃣ التقط صورة للإضافات التي ستحصل عليها، وانشرها كستوري مع وضع تاغ لي حتى أقوم بمشاركتها! 🙈💕\n\n"
+                "شكراً لدعمك! 🌟"
+        )
+        return True
+        
+    except FeedbackRequired as e:
+        log_to_telegram(f"⚠️ إنستغرام طلب تأكيد الهوية أو تعطيل مؤقت: {e}")
+        send_telegram_message(LOGGING_CHAT_ID, f"⚠️ حدث خطأ: إنستغرام طلب تأكيد الهوية أو تم تعطيل الحساب مؤقتًا أثناء محاولة متابعة {username}.")
+        return False
+    except ClientError as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء محاولة متابعة {username}: {e}")
+        send_telegram_message(LOGGING_CHAT_ID, f"❌ حدث خطأ أثناء محاولة متابعة {username}: {e}")
+        return False
+    except Exception as e:
+        log_to_telegram(f"❌ خطأ غير متوقع أثناء محاولة متابعة {username}: {e}")
+        send_telegram_message(LOGGING_CHAT_ID, f"❌ خطأ غير متوقع أثناء محاولة متابعة {username}: {e}")
+        return False
+
+def follow_accounts(limit):
+    global operation_count, serial_number, follow_running, resume_following
+    followed_count = 0
+    follow_running = True
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT user_id, username 
+            FROM processed_users 
+            WHERE conditions_met = 1 
+              AND followed = 0 
+            ORDER BY id ASC
+            LIMIT ?
+        ''', (limit,))
+        accounts_to_follow = cursor.fetchall()
+
+    if not accounts_to_follow:
+        log_to_telegram("🚫 لا يوجد حسابات جديدة لمتابعتها.")
+        return
+
+    for user_id, username in accounts_to_follow:
+        if not follow_running:
+            log_to_telegram("🛑 تم إيقاف عملية المتابعة.")
+            break
+
+        success = perform_random_activity_and_follow(user_id, username)
+        if success:
+            serial_number = save_or_update_account(user_id, username, f"https://www.instagram.com/{username}/", True)
+            message = (
+                f"#{serial_number} ✅ تم متابعة الحساب بنجاح:\n"
+                f"👤 اسم المستخدم: {username}\n"
+                f"🔗 الرابط: https://www.instagram.com/{username}/"
+            )
+            send_telegram_message(FOLLOW_SUCCESS_CHAT_ID, message)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('UPDATE processed_users SET followed = 1, last_sent = ? WHERE user_id = ?', (datetime.now(), user_id))
+                conn.commit()
+            followed_count += 1
+        else:
+            message = f"❌ فشل في متابعة الحساب:\n👤 اسم المستخدم: {username}\n🔗 الرابط: https://www.instagram.com/{username}/"
+            send_telegram_message(FOLLOW_SUCCESS_CHAT_ID, message)
+
+        switch_proxy_if_needed()
+
+        time.sleep(random.randint(60, 120))  # تأخير بين 60-120 ثوانٍ بين المتابعات
+
+        if followed_count >= limit:
+            break
+
+    log_to_telegram(f"📊 تم متابعة {followed_count} حساب من أصل {limit} المطلوب.")
+    follow_running = False
+    if resume_following:
+        follow_accounts(limit - followed_count)
+
+def unfollow_accounts(limit=None):
+    global feedback_required, unfollow_running, unfollow_limit
+
+    unfollow_running = True
+    unfollow_count = 0
+    total_to_unfollow = get_unfollow_count()
+
+    if limit is not None and limit < total_to_unfollow:
+        total_to_unfollow = limit
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT user_id, username 
+            FROM processed_users 
+            WHERE followed = 1 AND unfollowed = 0
+            LIMIT ?
+        ''', (total_to_unfollow,))
+        accounts_to_unfollow = cursor.fetchall()
+
+    for user_id, username in accounts_to_unfollow:
+        if unfollow_count >= total_to_unfollow or not unfollow_running:
+            break
+
+        try:
+            switch_proxy_if_needed()  # تبديل البروكسي إذا لزم الأمر
+
+            cl.user_unfollow(user_id)
+            log_to_telegram(f"🚫 تم إلغاء متابعة الحساب: {username}")
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('UPDATE processed_users SET unfollowed = 1 WHERE user_id = ?', (user_id,))
+                conn.commit()
+            unfollow_count += 1
+
+            unfollow_limit -= 1  # تحديث المتغير بعد كل عملية إلغاء متابعة
+            send_start_stop_buttons(ADMIN_CHAT_ID)  # إعادة إرسال الأزرار مع العدد المحدث
+
+        except FeedbackRequired as e:
+            log_to_telegram(f"❌ حدث خطأ أثناء إلغاء متابعة الحساب {username}: {e}")
+            feedback_required = True
+            log_to_telegram("⚠️ تم تلقي خطأ 'feedback_required'. سيتم الانتظار لمدة 20 دقيقة قبل إعادة المحاولة.")
+            time.sleep(1200)
+            feedback_required = False
+            return
+        except Exception as e:
+            log_to_telegram(f"❌ حدث خطأ أثناء إلغاء متابعة الحساب {username}: {e}")
+
+        # تأخير طويل عشوائي بعد كل عملية إلغاء متابعة
+        time.sleep(random.randint(120, 200))  # Delay between 120-200 seconds
+
+    log_to_telegram(f"✅ تم إلغاء متابعة {unfollow_count} حساب من أصل {total_to_unfollow} المطلوب.")
+    unfollow_running = False
+
+def schedule_unfollow(hours):
+    global scheduled_unfollow_time, unfollow_timer_thread
+
+    def delayed_unfollow():
+        global scheduled_unfollow_time
+        time.sleep(hours * 3600)
+        scheduled_unfollow_time = None
+        unfollow_accounts()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        scheduled_unfollow_time = datetime.now() + timedelta(hours=hours)
+        cursor.execute('INSERT INTO scheduled_unfollows (schedule_time) VALUES (?)', (scheduled_unfollow_time,))
+        conn.commit()
+
+    unfollow_timer_thread = threading.Thread(target=delayed_unfollow)
+    unfollow_timer_thread.start()
+    log_to_telegram(f"⏰ تم جدولة إلغاء المتابعة بعد {hours} ساعة.")
+
+def show_remaining_unfollow_time(chat_id):
+    if scheduled_unfollow_time:
+        remaining_time = scheduled_unfollow_time - datetime.now()
+        hours, remainder = divmod(int(remaining_time.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        bot.send_message(chat_id, f"⏳ الوقت المتبقي حتى إلغاء المتابعة: {hours} ساعة و {minutes} دقيقة و {seconds} ثانية.")
+    else:
+        bot.send_message(chat_id, "🚫 لا توجد عملية إلغاء متابعة مجدولة حالياً.")
+
+def delete_scheduled_unfollow(chat_id):
+    global scheduled_unfollow_time, unfollow_timer_thread
+
+    if scheduled_unfollow_time:
+        scheduled_unfollow_time = None
+        if unfollow_timer_thread and unfollow_timer_thread.is_alive():
+            unfollow_timer_thread.join(timeout=0.1)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM scheduled_unfollows')
+            conn.commit()
+        bot.send_message(chat_id, "❌ تم حذف عملية إلغاء المتابعة المجدولة.")
+    else:
+        bot.send_message(chat_id, "🚫 لا توجد عملية إلغاء متابعة مجدولة لحذفها.")
+
+def retry_failed_accounts():
+    while running:
+        if not retry_queue.empty():
+            user_id, username, profile_url = retry_queue.get()
+            log_to_telegram(f"🔄 إعادة فحص الحساب: {username}")
+            follow_status = check_following_conditions(user_id)
+            if follow_status and follow_status != "private":
+                serial_number = save_or_update_account(user_id, username, profile_url, True)
+                if serial_number:
+                    result_message = send_instagram_message(user_id, 
+                        "🎉 مبروك! تم حجز اسمك للدعم المجاني لأنك طبقت الشروط بنجاح 🎉\n\n"
+                        "📅 الدعم سيكون الساعة 9 مساءً بتوقيت العراق 🇮🇶\n"
+                        "🕘 وهو ما يعادل:\n"
+                        "🔸 الساعة 8 مساءً بتوقيت مصر 🇪🇬\n"
+                        "🔸 الساعة 8 مساءً بتوقيت سوريا 🇸🇾\n"
+                        "🔸 الساعة 9 مساءً بتوقيت السعودية 🇸🇦\n"
+                        "🔸 الساعة 7 مساءً بتوقيت المغرب 🇲🇦\n"
+                        "🔸 الساعة 9 مساءً بتوقيت اليمن 🇾🇪"
+                    )
+                    message = (
+                        f"#{serial_number} ✅ تم التأكد من الحساب:\n"
+                        f"👤 اسم المستخدم: {username}\n"
+                        f"🔗 الرابط: {profile_url}\n"
+                        f"{result_message}"
+                    )
+                    send_telegram_message(ADMIN_CHAT_ID, message)
+            else:
+                log_to_telegram(f"❌ لم ينجح الحساب في إعادة الفحص: {username}")
+        time.sleep(1)
+
+def process_messages_concurrently(folder):
+    global check_limit, sent_accounts_count, operation_count, running, feedback_required
+
+    try:
+        threads = cl.direct_threads()
+    except ClientError as e:
+        log_to_telegram(f"❌ حدث خطأ أثناء محاولة جلب المحادثات: {e}. سيتم إيقاف البوت وإعادة تشغيله بعد دقيقة.")
+        running = False
+        time.sleep(60)  # انتظار لمدة دقيقة قبل إعادة التشغيل
+        start_bot()
+        return
+
+    processed_users = 0
+
+    for thread in threads:
+        if not running:
+            log_to_telegram("🛑 تم إيقاف عملية الفحص.")
+            return
+        if paused:
+            time.sleep(1)
+            continue
+
+        for message in thread.messages:
+            if not running:  # تأكد من التحقق من حالة التشغيل في كل خطوة
+                log_to_telegram("🛑 تم إيقاف عملية الفحص.")
+                return
+
+            if sent_accounts_count >= check_limit:  # توقف الفحص عند الوصول إلى الحد المحدد
+                log_to_telegram(f"✅ تم العثور على {check_limit} حسابات تطبق الشروط. تم إيقاف الفحص.")
+                running = False
+                return
+
+            user_id = message.user_id
+            process_single_message(user_id)
+
+            time.sleep(1)  # إضافة تأخير بين كل طلب وآخر
+
+    if feedback_required:
+        log_to_telegram("⚠️ سيتم الانتظار 20 دقيقة قبل إعادة المحاولة بسبب قيود إنستغرام.")
+        time.sleep(1200)
+        feedback_required = False
+
+    if sent_accounts_count >= check_limit:
+        log_to_telegram("✅ تم الانتهاء من الفحص بنجاح.")
+        running = False
+
+def process_single_message(user_id):
+    global operation_count, sent_accounts_count, running  # إضافة running هنا
+
+    if not running:  # تحقق من حالة التشغيل في بداية العملية
+        return
+
+    with lock:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT conditions_met, followed FROM processed_users WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone()
+
+            if result:
+                conditions_met, followed = result
+                if conditions_met or followed:
+                    return
+
+            # تحقق إذا كان المستخدم قد تم تسجيله بأنه غير موجود
+            cursor.execute('SELECT user_id FROM processed_users WHERE user_id = ? AND username IS NULL', (user_id,))
+            not_found = cursor.fetchone()
+            if not_found:
+                return  # إذا كان المستخدم غير موجود سابقًا، تجاهله
+
+        if not running:  # تحقق من حالة التشغيل بعد الوصول للمستخدم
+            return
+
+        try:
+            user_info = cl.user_info(user_id)
+            username = user_info.username
+        except UserNotFound:
+            log_to_telegram(f"❌ المستخدم ذو المعرف {user_id} غير موجود.")
+            # تسجيل المستخدم في قاعدة البيانات بأنه غير موجود
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO processed_users (user_id, username, followed, unfollowed, conditions_met)
+                    VALUES (?, NULL, 0, 0, 0)
+                ''', (user_id,))
+                conn.commit()
+            return
+        except ClientUnauthorizedError:
+            log_to_telegram("❌ الجلسة غير مصرح بها. إعادة المصادقة...")
+            login_to_instagram()
+            return
+        except Exception as e:
+            log_to_telegram(f"❌ حدث خطأ غير متوقع: {e}")
+            return
+
+        if username == OWN_USERNAME:
+            return
+
+        can_process, can_send = can_process_or_send(user_id)
+
+        if not can_process:
+            return
+
+        if not running:  # تحقق من حالة التشغيل قبل متابعة المستخدم
+            return
+
+        switch_proxy_if_needed()  # تبديل البروكسي إذا لزم الأمر
+
+        follow_status = check_following_conditions(user_id)
+        profile_url = f"https://www.instagram.com/{username}/"
+
+        if follow_status == "private":
+            result_message = send_instagram_message(user_id, "🔒 يرجى جعل حسابك عامًا حتى تتدخل في الدعم 🌟")
+            message = f"🔒 الحساب خاص:\n👤 اسم المستخدم: {username}\n🔗 الرابط: {profile_url}\n{result_message}"
+            save_or_update_account(user_id, username, profile_url, False)
+            send_telegram_message(NON_CONDITIONS_GROUP_CHAT_ID, message)
+        elif follow_status:
+            serial_number = save_or_update_account(user_id, username, profile_url, True)
+            if can_send and serial_number:
+                result_message = send_instagram_message(user_id, 
+                    "🎉 مبروك! تم حجز اسمك للدعم المجاني لأنك طبقت الشروط بنجاح 🎉\n\n"
+                    "📅 الدعم سيكون الساعة 9 مساءً بتوقيت العراق 🇮🇶\n"
+                    "🕘 وهو ما يعادل:\n"
+                    "🔸 الساعة 8 مساءً بتوقيت مصر 🇪🇬\n"
+                    "🔸 الساعة 8 مساءً بتوقيت سوريا 🇸🇾\n"
+                    "🔸 الساعة 9 مساءً بتوقيت السعودية 🇸🇦\n"
+                    "🔸 الساعة 7 مساءً بتوقيت المغرب 🇲🇦\n"
+                    "🔸 الساعة 9 مساءً بتوقيت اليمن 🇾🇪"
+                )
+                message = (
+                    f"#{serial_number} ✅ تم التأكد من الحساب:\n"
+                    f"👤 اسم المستخدم: {username}\n"
+                    f"🔗 الرابط: {profile_url}\n"
+                    f"{result_message}"
+                )
+                send_telegram_message(ADMIN_CHAT_ID, message)
+            sent_accounts_count += 1
+
+            if sent_accounts_count >= check_limit:
+                log_to_telegram(f"🛑 تم العثور على {check_limit} حسابات تطبق الشروط. تم إيقاف الفحص.")
+                running = False
+        else:
+            save_or_update_account(user_id, username, profile_url, False)
+            result_message = send_instagram_message(user_id, 
+                "عذراً عزيزي، تم فحص حسابك ولكن لم تستوفِ الشروط.\n\n"
+                "عليك إكمال الشروط لتتدخل في الدعم 🌟\n\n"
+                "الشروط:\n"
+                "1️⃣ أن تكون ضايف لكل من ضايفهم في هذا الحساب @rjy.u\n"
+                "2️⃣ أن يكون حسابك عامًا وليس خاصًا 🔓\n\n"
+                "بعد إتمام الشروط سيتم فحص حسابك مرة أخرى بعد 5 دقائق ⏰"
+            )
+            message = f"❌ الحساب لم يطبق الشروط:\n👤 اسم المستخدم: {username}\n🔗 الرابط: {profile_url}\n{result_message}"
+            send_telegram_message(NON_CONDITIONS_GROUP_CHAT_ID, message)
+
+            retry_queue.put((user_id, username, profile_url))
+
+def check_without_message(limit):
+    global sent_accounts_count, running
+
+    running = True
+    sent_accounts_count = 0
+
+    def check_process():
+        global running, sent_accounts_count  # إضافة global هنا
+        while running and sent_accounts_count < limit:
+            process_messages_concurrently('general')
+            process_messages_concurrently('primary')
+            time.sleep(1)  # تأخير بسيط لتجنب التحميل الزائد على السيرفر
+
+        log_to_telegram(f"✅ تم الوصول إلى الحد الأقصى للحسابات المستوفية للشروط ({limit}). تم إيقاف الفحص.")
+        running = False
+
+    check_thread = threading.Thread(target=check_process)
+    check_thread.start()
+
+def run_bot():
+    global running, resume_checking
+    while running:
+        try:
+            process_messages_concurrently('general')
+            if not running:
+                break
+            process_messages_concurrently('primary')
+            if not running:
+                break
+        except ProxyError as e:
+            log_to_telegram(f"❌ فشل الاتصال بجميع البروكسيات. إعادة تشغيل البوت بعد 60 ثانية.")
+            running = False
+            time.sleep(60)
+            start_bot()
+        except sqlite3.OperationalError as e:
+            if "disk is full" in str(e):
+                log_to_telegram("❌ خطأ: القرص أو قاعدة البيانات ممتلئة.")
+                running = False
+                cleanup_old_data()  # تنظيف البيانات القديمة لتوفير مساحة
+                time.sleep(60)  # انتظر 60 ثانية قبل المحاولة مرة أخرى
+                start_bot()
+        except Exception as e:
+            log_to_telegram(f"❌ Unexpected error in run_bot: {e}")
+    if resume_checking:
+        start_bot()
+
+def start_bot():
+    global running, paused, bot_thread, resume_checking, resume_following
+
+    if bot_thread and bot_thread.is_alive():
+        log_to_telegram("⚠️ البوت يعمل بالفعل. لا يمكن بدء عملية جديدة.")
+        return
+
+    running = True
+    paused = False
+    resume_checking = False
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.start()
+
+    retry_thread = threading.Thread(target=retry_failed_accounts)
+    retry_thread.start()
+
+def stop_following():
+    global follow_running, resume_following
+    follow_running = False
+    resume_following = False
+
+def stop_unfollowing():
+    global unfollow_running
+    unfollow_running = False
+
+def get_unfollow_count():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM processed_users WHERE followed = 1 AND unfollowed = 0')
+        count = cursor.fetchone()[0]
+    return count
+
+def send_start_stop_buttons(chat_id):
+    markup = telebot.types.InlineKeyboardMarkup()
+
+    start_button = telebot.types.InlineKeyboardButton("🟢 بدء الفحص", callback_data="start_checking")
+    stop_button = telebot.types.InlineKeyboardButton("🔴 إيقاف الفحص", callback_data="stop_checking")
+    resume_check_button = telebot.types.InlineKeyboardButton("🔄 استئناف الفحص", callback_data="resume_checking")
+    resume_follow_button = telebot.types.InlineKeyboardButton("🔄 استئناف المتابعة", callback_data="resume_following")
+    update_following_button = telebot.types.InlineKeyboardButton("🔄 تحديث قائمة المتابعين", callback_data="update_following")
+    change_limit_button = telebot.types.InlineKeyboardButton("📝 تعيين عدد الحسابات", callback_data="change_check_limit")
+    reset_serial_button = telebot.types.InlineKeyboardButton("🔄 تصفير الرقم التسلسلي", callback_data="reset_serial_number")
+    follow_button = telebot.types.InlineKeyboardButton("👥 متابعة الحسابات المستوفية", callback_data="follow_accounts")
+    stop_follow_button = telebot.types.InlineKeyboardButton("🛑 إيقاف المتابعة", callback_data="stop_following")
+    show_count_button = telebot.types.InlineKeyboardButton("📊 عرض عدد الحسابات", callback_data="show_accounts_count")
+    unfollow_button = telebot.types.InlineKeyboardButton("🚫 إلغاء المتابعة", callback_data="unfollow_accounts")
+    schedule_unfollow_button = telebot.types.InlineKeyboardButton("⏰ جدولة إلغاء المتابعة", callback_data="schedule_unfollow")
+    show_remaining_time_button = telebot.types.InlineKeyboardButton("⏳ عرض الوقت المتبقي", callback_data="show_remaining_time")
+    delete_scheduled_unfollow_button = telebot.types.InlineKeyboardButton("❌ حذف جدولة إلغاء المتابعة", callback_data="delete_scheduled_unfollow")
+    check_without_message_button = telebot.types.InlineKeyboardButton("🔍 فحص بدون رسالة", callback_data="check_without_message")  
+    unfollow_count_button = telebot.types.InlineKeyboardButton("🚫 عرض الحسابات المتاحة للالغاء المتابعة", callback_data="show_unfollow_count")
+    set_unfollow_limit_button = telebot.types.InlineKeyboardButton(f"📝 تعيين عدد حسابات الإلغاء ({get_unfollow_count()})", callback_data="set_unfollow_limit")
+    stop_unfollow_button = telebot.types.InlineKeyboardButton("🛑 إيقاف إلغاء المتابعة", callback_data="stop_unfollowing")
+
+    # Add other existing buttons here as needed
+    markup.add(start_button)
+    markup.add(stop_button)
+    markup.add(resume_check_button)
+    markup.add(resume_follow_button)
+    markup.add(update_following_button)
+    markup.add(change_limit_button)
+    markup.add(reset_serial_button)
+    markup.add(follow_button)
+    markup.add(stop_follow_button)
+    markup.add(show_count_button)
+    markup.add(unfollow_button)
+    markup.add(schedule_unfollow_button)
+    markup.add(show_remaining_time_button)
+    markup.add(delete_scheduled_unfollow_button)
+    markup.add(check_without_message_button)
+    markup.add(unfollow_count_button)
+    markup.add(set_unfollow_limit_button)
+    markup.add(stop_unfollow_button)
+
+    bot.send_message(chat_id, "اختر إجراءً:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    global running, paused, resume_checking, resume_following
+
+    if call.data == "start_checking":
+        start_bot()
+        bot.send_message(call.message.chat.id, f"تم تشغيل البوت مع حد الفحص: {check_limit}.")
+    elif call.data == "stop_checking":
+        running = False
+        paused = False
+        bot.send_message(call.message.chat.id, "🛑 تم إيقاف عملية الفحص على الفور.")
+    elif call.data == "resume_checking":
+        resume_checking = True
+        start_bot()
+        bot.send_message(call.message.chat.id, "🔄 تم استئناف عملية الفحص.")
+    elif call.data == "resume_following":
+        resume_following = True
+        bot.send_message(call.message.chat.id, "يرجى إرسال عدد الحسابات التي ترغب في متابعتها:")
+        bot.register_next_step_handler(call.message, set_follow_limit)
+    elif call.data == "change_check_limit":
+        bot.send_message(call.message.chat.id, "يرجى إرسال عدد الحسابات التي ترغب في فحصها:")
+        bot.register_next_step_handler(call.message, set_check_limit)
+    elif call.data == "reset_serial_number":
+        reset_serial_number()
+        bot.send_message(call.message.chat.id, "تم تصفير الرقم التسلسلي للحسابات التي استوفت الشروط.")
+    elif call.data == "follow_accounts":
+        bot.send_message(call.message.chat.id, "يرجى إرسال عدد الحسابات التي ترغب في متابعتها:")
+        bot.register_next_step_handler(call.message, set_follow_limit)
+    elif call.data == "stop_following":
+        stop_following()
+        bot.send_message(call.message.chat.id, "تم إيقاف عملية المتابعة.")
+    elif call.data == "show_accounts_count":
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM processed_users WHERE conditions_met = 1')
+            count = cursor.fetchone()[0]
+        bot.send_message(call.message.chat.id, f"عدد الحسابات التي طبقت الشروط: {count}")
+    elif call.data == "unfollow_accounts":
+        unfollow_accounts()
+        bot.send_message(call.message.chat.id, "تم إلغاء متابعة الحسابات التي تم متابعتها.")
+    elif call.data == "schedule_unfollow":
+        bot.send_message(call.message.chat.id, "يرجى إرسال عدد الساعات لجدولة إلغاء المتابعة:")
+        bot.register_next_step_handler(call.message, set_unfollow_schedule)
+    elif call.data == "show_remaining_time":
+        show_remaining_unfollow_time(call.message.chat.id)
+    elif call.data == "delete_scheduled_unfollow":
+        delete_scheduled_unfollow(call.message.chat.id)
+    elif call.data == "update_following":
+        update_following_accounts()
+        bot.send_message(call.message.chat.id, "تم تحديث قائمة المتابعين.")
+    elif call.data == "check_without_message":  
+        bot.send_message(call.message.chat.id, "يرجى إرسال الحد الأقصى للحسابات المستوفية للشروط:")
+        bot.register_next_step_handler(call.message, set_check_without_message_limit)
+    elif call.data == "show_unfollow_count":
+        count = get_unfollow_count()
+        bot.send_message(call.message.chat.id, f"🚫 عدد الحسابات المتاحة لإلغاء المتابعة: {count}")
+    elif call.data == "set_unfollow_limit":
+        bot.send_message(call.message.chat.id, f"يرجى إرسال عدد الحسابات التي ترغب في إلغاء متابعتها:")
+        bot.register_next_step_handler(call.message, set_unfollow_limit)
+    elif call.data == "stop_unfollowing":
+        stop_unfollowing()
+        bot.send_message(call.message.chat.id, "🛑 تم إيقاف عملية إلغاء المتابعة.")
+
+def set_check_limit(message):
+    global check_limit
+    try:
+        limit = int(message.text)
+        if limit > 0:
+            check_limit = limit
+            bot.send_message(message.chat.id, f"تم ضبط حد الفحص إلى {check_limit}.")
+        else:
+            bot.send_message(message.chat.id, "يرجى إدخال رقم موجب.")
+    except ValueError:
+        bot.send_message(message.chat.id, "رقم غير صالح. حاول مرة أخرى.")
+
+def set_follow_limit(message):
+    try:
+        limit = int(message.text)
+        if limit > 0:
+            bot.send_message(message.chat.id, f"سيتم متابعة {limit} حساب.")
+            global follow_thread
+            follow_thread = threading.Thread(target=follow_accounts, args=(limit,))
+            follow_thread.start()
+        else:
+            bot.send_message(message.chat.id, "يرجى إدخال رقم موجب.")
+    except ValueError:
+        bot.send_message(message.chat.id, "رقم غير صالح. حاول مرة أخرى.")
+
+def set_unfollow_schedule(message):
+    try:
+        hours = int(message.text)
+        if hours > 0:
+            schedule_unfollow(hours)
+            bot.send_message(message.chat.id, f"تم جدولة إلغاء المتابعة بعد {hours} ساعة.")
+        else:
+            bot.send_message(message.chat.id, "يرجى إدخال عدد ساعات موجب.")
+    except ValueError:
+        bot.send_message(message.chat.id, "رقم غير صالح. حاول مرة أخرى.")
+
+def set_check_without_message_limit(message):
+    try:
+        limit = int(message.text)
+        if limit > 0:
+            bot.send_message(message.chat.id, f"سيتم فحص {limit} حسابات بدون إرسال رسالة للمستخدمين.")
+            check_without_message(limit)
+        else:
+            bot.send_message(message.chat.id, "يرجى إدخال رقم موجب.")
+    except ValueError:
+        bot.send_message(message.chat.id, "رقم غير صالح. حاول مرة أخرى.")
+
+def set_unfollow_limit(message):
+    global unfollow_limit
+    try:
+        limit = int(message.text)
+        if limit > 0:
+            unfollow_limit = limit
+            bot.send_message(message.chat.id, f"سيتم إلغاء متابعة {limit} حساب.")
+            unfollow_accounts(limit)
+        else:
+            bot.send_message(message.chat.id, "يرجى إدخال رقم موجب.")
+    except ValueError:
+        bot.send_message(message.chat.id, "رقم غير صالح. حاول مرة أخرى.")
+
+def cleanup_old_data():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # حذف السجلات الأقدم من 30 يومًا كمثال
+        cursor.execute('DELETE FROM processed_users WHERE last_checked < ?', (datetime.now() - timedelta(days=30),))
+        conn.commit()
+    log_to_telegram("✅ تم تنظيف البيانات القديمة من قاعدة البيانات.")
+
+def run_polling():
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=1, timeout=20)
+        except requests.exceptions.ConnectionError as e:
+            log_to_telegram(f"⚠️ فقد الاتصال بالخادم: {e}. إعادة المحاولة بعد 15 ثانية.")
+            time.sleep(15)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 502:
+                log_to_telegram(f"⚠️ خطأ 502 Bad Gateway: {e}. إعادة المحاولة بعد 30 ثانية.")
+                time.sleep(30)
+            else:
+                log_to_telegram(f"❌ حدث خطأ غير متوقع: {e}. إعادة المحاولة بعد 15 ثانية.")
+                time.sleep(15)
+        except Exception as e:
+            log_to_telegram(f"❌ حدث خطأ غير متوقع: {e}. إعادة المحاولة بعد 15 ثانية.")
+            time.sleep(15)
+
+@bot.message_handler(commands=['start', 'help'])
+def handle_start_help(message):
+    send_start_stop_buttons(message.chat.id)
+
+if __name__ == "__main__":
+    create_shared_tables()
+    load_serial_number()
+    load_proxies_from_api()
+    connect_to_proxy()
+    login_to_instagram()
+
+    run_polling()
